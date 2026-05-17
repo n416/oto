@@ -1,3 +1,6 @@
 [submodule "Irodori-TTS"]
-	path = Irodori-TTS
+	path = backend/Irodori-TTS
 	url = https://github.com/n416/Irodori-TTS.git
+[submodule "backend/audiocraft"]
+	path = backend/audiocraft
+	url = https://github.com/n416/audiocraft.git

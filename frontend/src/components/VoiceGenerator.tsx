@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { Client } from '@gradio/client';
 import type { CharacterData } from './CharacterSettings';
 import type { VoiceData, DialogOptions } from '../App';
 
@@ -15,42 +16,101 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
   const [speechText, setSpeechText] = useState("こんにちは。これは音声合成のテストです。");
   const [isGenerating, setIsGenerating] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (!voicePrompt || !speechText) return;
     setIsGenerating(true);
     
-    // 疑似的な生成処理 (バックエンド連携時にAPIコールに置き換え)
-    setTimeout(() => {
+    try {
+      const client = await Client.connect("http://127.0.0.1:7861/");
+      const result = await client.predict("/generate", [
+        "Aratako/Irodori-TTS-500M-v2-VoiceDesign", // checkpoint
+        "cuda", // model_device
+        "bf16", // model_precision
+        "cuda", // codec_device
+        "bf16", // codec_precision
+        speechText, // text
+        voicePrompt, // caption
+        40, // num_steps
+        1, // num_candidates
+        "", // seed_raw
+        "", // seconds_raw
+        1.0, // duration_scale
+        "linear", // t_schedule_mode
+        -1.0, // sway_coeff
+        "independent", // cfg_guidance_mode
+        2.0, // cfg_scale_text
+        4.0, // cfg_scale_caption
+        "", // cfg_scale_raw
+        0.5, // cfg_min_t
+        1.0, // cfg_max_t
+        true, // context_kv_cache
+        "", // max_text_len_raw
+        "", // max_caption_len_raw
+        "", // truncation_factor_raw
+        "", // rescale_k_raw
+        "", // rescale_sigma_raw
+        "", // lora_adapter_raw
+      ]);
+
+      // @ts-ignore
+      const audioData = result.data?.[0]; // num_candidates=1なので最初の要素
+      console.log("Gradio API Response audioData:", audioData);
+      
+      let audioUrl = "#";
+      // Gradioの gr.update() 形式に対応
+      const rawValue = (audioData && typeof audioData === "object" && audioData.__type__ === "update") 
+        ? audioData.value 
+        : audioData;
+
+      if (typeof rawValue === "string") {
+        audioUrl = rawValue.startsWith("http") ? rawValue : `http://127.0.0.1:7861/file=${rawValue}`;
+      } else if (rawValue && typeof rawValue === "object") {
+        // @ts-ignore
+        audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7861/file=${rawValue.path}` : "#");
+      }
+
       const newVoice: VoiceData = {
         id: `voice_${Date.now()}`,
-        name: `生成ボイス (${new Date().toLocaleTimeString()})`,
+        name: voicePrompt, // デフォルト名をプロンプトと同一にする
         prompt: voicePrompt,
         text: speechText,
-        audioUrl: "#", // ダミー
+        audioUrl: audioUrl,
         source: 'generated',
         timestamp: new Date().toLocaleTimeString()
       };
-      setVoices([newVoice, ...voices]);
+      setVoices(prev => [newVoice, ...prev]);
+    } catch (error) {
+      console.error(error);
+      setDialog({
+        type: 'alert',
+        title: '生成エラー',
+        message: 'バックエンドとの通信に失敗しました。Irodori-TTSのVoice Designサーバー (127.0.0.1:7861) が起動しているか確認してください。'
+      });
+    } finally {
       setIsGenerating(false);
-    }, 2000);
+    }
   };
 
   const handleImportWav = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     
+    const audioUrl = URL.createObjectURL(file);
+    
     const newVoice: VoiceData = {
       id: `imported_${Date.now()}`,
       name: file.name,
       prompt: "（外部からインポートした音声）",
       text: "", // インポート直後は空なので、ユーザーに手入力させる
-      audioUrl: file.name, // 実際はObjectURL等にするかパスを保存する
+      audioUrl: audioUrl,
       source: 'imported',
       timestamp: new Date().toLocaleTimeString()
     };
     
-    setVoices([newVoice, ...voices]);
+    setVoices(prev => [newVoice, ...prev]);
     // 連続して同じファイルを選べるようにリセット
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -76,7 +136,7 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
       if (c.id === charId) {
         return {
           ...c,
-          refAudioPath: voice.source === 'imported' ? voice.name : `generated_${voice.id}.wav`,
+          refAudioPath: voice.audioUrl, // 実際のURL（Blob URL または http://...）を保存
           refText: voice.text
         };
       }
@@ -88,6 +148,31 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
       title: '通知',
       message: `キャラクター「${characters.find(c => c.id === charId)?.name}」の参考音声に割り当てました！`
     });
+  };
+
+  const togglePlay = (voiceId: string, audioUrl: string) => {
+    if (playingId === voiceId) {
+      // すでに再生中なら停止する
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      }
+      setPlayingId(null);
+    } else {
+      // 別の音声を再生開始する
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      if (audioUrl && audioUrl !== '#') {
+        const audio = new Audio(audioUrl);
+        audio.onended = () => setPlayingId(null); // 再生終了時に状態を戻す
+        audio.play().catch(e => console.error("Audio playback failed", e));
+        audioRef.current = audio;
+        setPlayingId(voiceId);
+      } else {
+        setDialog({ type: 'alert', title: 'エラー', message: '音声データがありません。' });
+      }
+    }
   };
 
   return (
@@ -191,8 +276,28 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
                     ) : (
                       <span style={{ fontSize: '11px', color: '#63b3ed', backgroundColor: 'rgba(99, 179, 237, 0.15)', padding: '2px 6px', borderRadius: '4px' }}>🎲 自動生成</span>
                     )}
-                    <span style={{ fontSize: '14px', color: '#fff', fontWeight: 'bold' }}>{voice.name}</span>
-                    <span style={{ fontSize: '11px', color: '#666' }}>({voice.timestamp})</span>
+                    <input 
+                      type="text"
+                      value={voice.name}
+                      onChange={(e) => updateVoice(voice.id, 'name', e.target.value)}
+                      style={{ 
+                        fontSize: '14px', 
+                        color: '#fff', 
+                        fontWeight: 'bold', 
+                        backgroundColor: 'transparent', 
+                        border: '1px solid transparent', 
+                        borderBottom: '1px dashed #666',
+                        outline: 'none',
+                        flex: 1,
+                        minWidth: '150px',
+                        padding: '2px 4px'
+                      }}
+                      onFocus={e => e.currentTarget.style.borderBottom = '1px solid #4a90e2'}
+                      onBlur={e => e.currentTarget.style.borderBottom = '1px dashed #666'}
+                      title="クリックして名前を変更"
+                      placeholder="ボイスの名前"
+                    />
+                    <span style={{ fontSize: '11px', color: '#666', whiteSpace: 'nowrap' }}>({voice.timestamp})</span>
                   </div>
                   
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -220,12 +325,6 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
                   </div>
                 </div>
 
-                {voice.source === 'generated' && (
-                  <div>
-                    <div style={{ fontSize: '11px', color: '#888', marginBottom: '4px' }}>プロンプト</div>
-                    <div style={{ fontSize: '13px', color: '#e2e8f0', backgroundColor: 'rgba(255,255,255,0.03)', padding: '8px', borderRadius: '4px' }}>{voice.prompt}</div>
-                  </div>
-                )}
 
                 <div>
                   <div style={{ fontSize: '11px', color: '#888', marginBottom: '4px' }}>
@@ -238,11 +337,23 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginTop: '8px', paddingTop: '16px', borderTop: '1px dashed #333' }}>
                   <button 
-                    style={{ padding: '8px 16px', backgroundColor: '#2d3748', color: '#fff', border: '1px solid #4a5568', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', transition: 'background-color 0.2s' }}
-                    onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
-                    onMouseLeave={e => e.currentTarget.style.backgroundColor = '#2d3748'}
+                    onClick={() => togglePlay(voice.id, voice.audioUrl)}
+                    style={{ 
+                      padding: '8px 16px', 
+                      backgroundColor: playingId === voice.id ? '#e53e3e' : '#2d3748', 
+                      color: '#fff', 
+                      border: '1px solid #4a5568', 
+                      borderRadius: '4px', 
+                      cursor: 'pointer', 
+                      fontSize: '13px', 
+                      transition: 'background-color 0.2s',
+                      width: '90px',
+                      textAlign: 'center'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.backgroundColor = playingId === voice.id ? '#c53030' : '#4a5568'}
+                    onMouseLeave={e => e.currentTarget.style.backgroundColor = playingId === voice.id ? '#e53e3e' : '#2d3748'}
                   >
-                    ▶ 再生
+                    {playingId === voice.id ? '⏹ 停止' : '▶ 再生'}
                   </button>
                   
                   <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'flex-end' }}>
@@ -250,9 +361,8 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
                     <select 
                       onChange={(e) => {
                         handleAssignToCharacter(voice, e.target.value);
-                        e.target.value = ""; // 選択後リセット
                       }}
-                      value=""
+                      value={characters.find(c => c.refAudioPath === voice.audioUrl)?.id || ""}
                       style={{ padding: '8px', backgroundColor: '#252526', color: '#63b3ed', border: '1px solid #4a5568', borderRadius: '4px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold', outline: 'none' }}
                     >
                       <option value="" disabled>キャラを選択...</option>

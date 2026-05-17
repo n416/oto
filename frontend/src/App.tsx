@@ -1,10 +1,11 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
-import { Layout, Model, TabNode } from 'flexlayout-react';
+import { Layout, Model, TabNode, Actions } from 'flexlayout-react';
 import type { IJsonModel } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css';
 import { SettingsModal } from './components/SettingsModal';
 import { CharacterSettings, type CharacterData } from './components/CharacterSettings';
 import { VoiceGenerator } from './components/VoiceGenerator';
+import { SfxGenerator } from './components/SfxGenerator';
 import { PreviewPane } from './components/PreviewPane';
 
 type LayerType = string;
@@ -30,12 +31,32 @@ export interface VoiceData {
   timestamp: string;
 }
 
+export interface SfxData {
+  id: string;
+  name: string;
+  prompt: string;
+  audioUrl: string;
+  source: 'generated' | 'imported';
+  timestamp: string;
+}
+
 interface ParsedBlock {
   id: string;
   lineIndex: number;
   layer: LayerType;
   text: string;
   color: string;
+}
+
+export interface TakeData {
+  id: string;
+  audioUrl: string;
+  timestamp: string;
+}
+
+export interface LineTakes {
+  takes: TakeData[];
+  activeTakeId: string | null;
 }
 
 export type DialogOptions = {
@@ -62,7 +83,7 @@ const initialLayout: IJsonModel = {
     children: [
       {
         type: "tabset",
-        weight: 35,
+        weight: 70,
         children: [
           {
             type: "tab",
@@ -79,13 +100,13 @@ const initialLayout: IJsonModel = {
             id: "tab-voice-design",
             name: "🎨 ボイスデザイン",
             component: "voice"
-          }
-        ]
-      },
-      {
-        type: "tabset",
-        weight: 35,
-        children: [
+          },
+          {
+            type: "tab",
+            id: "tab-sfx-design",
+            name: "💣 効果音デザイン",
+            component: "sfx"
+          },
           {
             type: "tab",
             name: "📺 プレビュー",
@@ -115,10 +136,26 @@ const defaultLayers: LayerInfo[] = [
 ];
 
 function App() {
-  const [layoutModel] = useState<Model>(() => Model.fromJson(initialLayout));
+  const [layoutModel, setLayoutModel] = useState<Model>(() => {
+    const saved = localStorage.getItem('oto_ide_layout');
+    if (saved) {
+      try {
+        return Model.fromJson(JSON.parse(saved));
+      } catch (e) {}
+    }
+    return Model.fromJson(initialLayout);
+  });
+  const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
   
   // --- カスタムダイアログ用ステート ---
   const [dialog, setDialog] = useState<DialogOptions | null>(null);
+
+  // --- プロジェクト用ステート ---
+  const [lineTakesMap, setLineTakesMap] = useState<Record<string, LineTakes>>({});
+
+  const [cursorPos, setCursorPos] = useState<number | null>(null);
+  const [sfxAutocomplete, setSfxAutocomplete] = useState<{ active: boolean, lineIndex: number, colIndex: number } | null>(null);
+  const isComposingRef = useRef(false);
 
   const [layers, setLayers] = useState<LayerInfo[]>(() => {
     const saved = localStorage.getItem('oto_ide_layers');
@@ -175,6 +212,14 @@ function App() {
     return [];
   });
 
+  const [sfxs, setSfxs] = useState<SfxData[]>(() => {
+    const saved = localStorage.getItem('oto_ide_sfxs');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) {}
+    }
+    return [];
+  });
+
   // カット（区切り線）のY座標リスト（初期は3秒=180px毎）
   const [cuts, setCuts] = useState<number[]>(() => {
     const saved = localStorage.getItem('oto_ide_cuts');
@@ -205,9 +250,13 @@ function App() {
     localStorage.setItem('oto_ide_voices', JSON.stringify(voices));
   }, [voices]);
 
+  useEffect(() => {
+    localStorage.setItem('oto_ide_sfxs', JSON.stringify(sfxs));
+  }, [sfxs]);
+
   // JSONファイルへの書き出し
   const handleExport = () => {
-    const projectData = { scripts, characters, cuts, layers, voices };
+    const projectData = { scripts, characters, cuts, layers, voices, sfxs };
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(projectData, null, 2));
     const downloadNode = document.createElement('a');
     downloadNode.setAttribute("href", dataStr);
@@ -234,6 +283,7 @@ function App() {
           if (json.cuts) setCuts(json.cuts);
           if (json.layers) setLayers(json.layers);
           if (json.voices) setVoices(json.voices);
+          if (json.sfxs) setSfxs(json.sfxs);
         } else {
           setDialog({ type: 'alert', title: 'エラー', message: '対応していないファイル形式です。' });
         }
@@ -250,6 +300,7 @@ function App() {
     const closeMenu = () => {
       setContextMenu(null);
       setTimelineContextMenu(null);
+      setIsViewMenuOpen(false);
     };
     window.addEventListener('click', closeMenu);
     return () => window.removeEventListener('click', closeMenu);
@@ -468,12 +519,121 @@ function App() {
   // モーダル管理用のState
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
 
-  const handleScriptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setScripts({
-      ...scripts,
-      [activeTab]: e.target.value
-    });
+  const syncSfxNamesToLibrary = (text: string, cursor: number) => {
+    const sfxPattern = /SFX(\d{3}):([^\n]+)/g;
+    let match;
+    const currentSfxNames: Record<string, string> = {};
+    const allMatches = [];
+    
+    while ((match = sfxPattern.exec(text)) !== null) {
+      allMatches.push({
+        id: `SFX${match[1]}`,
+        name: match[2],
+        start: match.index,
+        end: match.index + match[0].length
+      });
+    }
+
+    for (const m of allMatches) {
+      if (cursor >= m.start && cursor <= m.end) {
+        currentSfxNames[m.id] = m.name;
+      } else if (!currentSfxNames[m.id]) {
+        currentSfxNames[m.id] = m.name;
+      }
+    }
+
+    let updatedText = text;
+    let sfxsUpdated = false;
+    const newSfxs = [...sfxs];
+
+    for (const [sfxId, newName] of Object.entries(currentSfxNames)) {
+      const existing = newSfxs.find(s => s.id === sfxId);
+      if (existing && existing.name !== newName) {
+        existing.name = newName;
+        sfxsUpdated = true;
+      }
+      
+      const regex = new RegExp(`${sfxId}:[^\\n]+`, 'g');
+      updatedText = updatedText.replace(regex, `${sfxId}:${newName}`);
+    }
+
+    if (sfxsUpdated) {
+      setSfxs(newSfxs);
+    }
+    
+    return updatedText;
   };
+
+  const handleSfxNameChangeFromLibrary = (sfxId: string, newName: string) => {
+    setSfxs(prev => prev.map(s => s.id === sfxId ? { ...s, name: newName } : s));
+    
+    let scriptsChanged = false;
+    const newScripts = { ...scripts };
+    for (const layerId of Object.keys(newScripts)) {
+      const text = newScripts[layerId];
+      if (text) {
+        const regex = new RegExp(`${sfxId}:[^\\n]+`, 'g');
+        const updatedText = text.replace(regex, `${sfxId}:${newName}`);
+        if (updatedText !== text) {
+          newScripts[layerId] = updatedText;
+          scriptsChanged = true;
+        }
+      }
+    }
+    if (scriptsChanged) {
+      setScripts(newScripts);
+    }
+  };
+
+  const handleCompositionStart = () => {
+    isComposingRef.current = true;
+  };
+
+  const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+    isComposingRef.current = false;
+    const target = e.target as HTMLTextAreaElement;
+    const newValue = target.value;
+    const cursor = target.selectionStart;
+
+    const updatedText = syncSfxNamesToLibrary(newValue, cursor);
+    if (updatedText !== newValue) {
+      setCursorPos(cursor);
+    }
+    setScripts(prev => ({ ...prev, [activeTab]: updatedText }));
+  };
+
+  const handleScriptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newValue = e.target.value;
+    const cursor = e.target.selectionStart;
+
+    const textBeforeCursor = newValue.substring(0, cursor);
+    if (textBeforeCursor.endsWith('SFX')) {
+      const lines = textBeforeCursor.split('\n');
+      const lineIndex = lines.length - 1;
+      const colIndex = lines[lines.length - 1].length;
+      setSfxAutocomplete({ active: true, lineIndex, colIndex });
+    } else {
+      setSfxAutocomplete(null);
+    }
+
+    if (isComposingRef.current) {
+      setScripts(prev => ({ ...prev, [activeTab]: newValue }));
+      return;
+    }
+
+    const updatedText = syncSfxNamesToLibrary(newValue, cursor);
+    if (updatedText !== newValue) {
+      setCursorPos(cursor);
+    }
+    setScripts(prev => ({ ...prev, [activeTab]: updatedText }));
+  };
+
+  useEffect(() => {
+    if (cursorPos !== null && editorRef.current) {
+      editorRef.current.setSelectionRange(cursorPos, cursorPos);
+      setCursorPos(null);
+    }
+  }, [scripts, cursorPos]);
 
   const handleScroll = () => {
     if (editorRef.current && gutterRef.current) {
@@ -521,7 +681,7 @@ function App() {
           setCharacters={setCharacters} 
           voices={voices}
           onGoToVoiceDesign={() => {
-            layoutModel.doAction(FlexLayout.Actions.selectTab("tab-voice-design"));
+            layoutModel.doAction(Actions.selectTab("tab-voice-design"));
           }}
           setDialog={setDialog}
         />
@@ -530,6 +690,10 @@ function App() {
 
     if (component === "voice") {
       return <VoiceGenerator characters={characters} setCharacters={setCharacters} voices={voices} setVoices={setVoices} setDialog={setDialog} />;
+    }
+
+    if (component === "sfx") {
+      return <SfxGenerator sfxs={sfxs} setSfxs={setSfxs} setDialog={setDialog} onSfxNameChange={handleSfxNameChangeFromLibrary} />;
     }
 
     if (component === "preview") {
@@ -625,15 +789,70 @@ function App() {
             </div>
             
             {/* テキストエディタ */}
-            <textarea 
-              ref={editorRef}
-              value={scripts[activeTab] || ''}
-              onChange={handleScriptChange}
-              onScroll={handleScroll}
-              spellCheck={false}
-              style={{ flex: 1, backgroundColor: '#1e1e1e', color: '#d4d4d4', border: 'none', padding: '16px', fontSize: '14px', fontFamily: 'Consolas, Monaco, monospace', lineHeight: '21px', resize: 'none', outline: 'none', whiteSpace: 'pre', overflowY: 'auto' }}
-              placeholder={`ここに ${layers.find(l => l.id === activeTab)?.name || ''} の台本を記述してください...`}
-            />
+            <div style={{ flex: 1, display: 'flex', position: 'relative' }}>
+              <textarea 
+                ref={editorRef}
+                value={scripts[activeTab] || ''}
+                onChange={handleScriptChange}
+                onCompositionStart={handleCompositionStart}
+                onCompositionEnd={handleCompositionEnd}
+                onScroll={handleScroll}
+                spellCheck={false}
+                style={{ flex: 1, backgroundColor: '#1e1e1e', color: '#d4d4d4', border: 'none', padding: '16px', fontSize: '14px', fontFamily: 'Consolas, Monaco, monospace', lineHeight: '21px', resize: 'none', outline: 'none', whiteSpace: 'pre', overflowY: 'auto' }}
+                placeholder={`ここに ${layers.find(l => l.id === activeTab)?.name || ''} の台本を記述してください...`}
+              />
+              
+              {sfxAutocomplete && (
+                <div style={{
+                  position: 'absolute',
+                  top: `${16 + (sfxAutocomplete.lineIndex * 21) - (editorRef.current?.scrollTop || 0) + 24}px`,
+                  left: `${16 + (sfxAutocomplete.colIndex * 7.7) - (editorRef.current?.scrollLeft || 0)}px`,
+                  backgroundColor: '#2d3748',
+                  border: '1px solid #4a5568',
+                  borderRadius: '6px',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                  zIndex: 1000,
+                  maxHeight: '200px',
+                  overflowY: 'auto',
+                  minWidth: '200px'
+                }}>
+                  <div style={{ padding: '4px 8px', fontSize: '11px', color: '#888', borderBottom: '1px solid #4a5568' }}>利用可能なSFX (クリックで挿入)</div>
+                  {sfxs.length === 0 && <div style={{ padding: '8px', fontSize: '12px', color: '#aaa' }}>SFXがありません</div>}
+                  {[...sfxs].sort((a, b) => a.id.localeCompare(b.id)).map(sfx => (
+                    <div 
+                      key={sfx.id}
+                      style={{ padding: '8px', fontSize: '13px', color: '#fff', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }}
+                      onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
+                      onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                      onMouseDown={(e) => {
+                        // Prevent textarea from losing focus before onClick
+                        e.preventDefault();
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!editorRef.current) return;
+                        const cursor = editorRef.current.selectionStart;
+                        const text = scripts[activeTab] || '';
+                        
+                        // "SFX" を削除して挿入
+                        const before = text.substring(0, cursor - 3); 
+                        const after = text.substring(cursor);
+                        const insertText = `${sfx.id}:${sfx.name}`;
+                        const newText = before + insertText + after;
+                        
+                        setScripts({ ...scripts, [activeTab]: newText });
+                        setSfxAutocomplete(null);
+                        setCursorPos(before.length + insertText.length);
+                        editorRef.current.focus();
+                      }}
+                    >
+                      <span style={{ color: '#e2a74a', fontWeight: 'bold' }}>{sfx.id}</span>
+                      <span>{sfx.name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       );
@@ -866,7 +1085,41 @@ function App() {
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#1e1e1e' }}>
       <header style={{ padding: '8px 16px', borderBottom: '1px solid #333', backgroundColor: '#333333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 style={{ margin: 0, fontSize: '14px', color: '#ccc' }}>Oto IDE</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+          <h1 style={{ margin: 0, fontSize: '14px', color: '#ccc' }}>Oto IDE</h1>
+          <div style={{ position: 'relative' }}>
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsViewMenuOpen(!isViewMenuOpen);
+              }}
+              style={{ background: 'none', border: 'none', color: '#ccc', cursor: 'pointer', fontSize: '13px', padding: '4px 8px', borderRadius: '4px' }}
+              onMouseEnter={e => e.currentTarget.style.backgroundColor = '#444'}
+              onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+            >
+              表示
+            </button>
+            {isViewMenuOpen && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, backgroundColor: '#2d3748', border: '1px solid #4a5568', borderRadius: '4px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', zIndex: 1000, minWidth: '180px', marginTop: '4px' }}>
+                <div 
+                  style={{ padding: '8px 16px', fontSize: '13px', color: '#e2e8f0', cursor: 'pointer' }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (window.confirm('表示状態を初期設定に戻しますか？')) {
+                      localStorage.removeItem('oto_ide_layout');
+                      setLayoutModel(Model.fromJson(initialLayout));
+                    }
+                    setIsViewMenuOpen(false);
+                  }}
+                >
+                  表示状態のリセット
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button 
             onClick={handlePlayToggle}
@@ -885,7 +1138,13 @@ function App() {
         </div>
       </header>
       <div style={{ flex: 1, position: 'relative' }}>
-        <Layout model={layoutModel} factory={factory} />
+        <Layout 
+          model={layoutModel} 
+          factory={factory} 
+          onModelChange={(model) => {
+            localStorage.setItem('oto_ide_layout', JSON.stringify(model.toJson()));
+          }}
+        />
       </div>
 
       <SettingsModal 
@@ -894,6 +1153,11 @@ function App() {
         lineNumber={selectedLine} 
         layer={activeTab}
         text={selectedLine ? (scripts[activeTab] || '').split('\n')[selectedLine - 1] : ''}
+        blockId={selectedLine ? `${activeTab}-${selectedLine - 1}` : ''}
+        lineTakesMap={lineTakesMap}
+        setLineTakesMap={setLineTakesMap}
+        characters={characters}
+        setDialog={setDialog}
       />
 
       {/* 右クリックメニュー: 行番号用 */}

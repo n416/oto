@@ -43,7 +43,7 @@ export const CharacterSettings: React.FC<CharacterSettingsProps> = ({ characters
       const newChars = [...characters];
       newChars[selectedIndex] = { 
         ...newChars[selectedIndex], 
-        refAudioPath: voice.source === 'imported' ? voice.name : `generated_${voice.id}.wav`,
+        refAudioPath: voice.audioUrl,
         refText: voice.text 
       };
       setCharacters(newChars);
@@ -78,10 +78,7 @@ export const CharacterSettings: React.FC<CharacterSettingsProps> = ({ characters
   // 現在選択されているVoiceDataのIDを探す
   let currentVoiceId = "";
   if (selectedChar?.refAudioPath) {
-    const matchedVoice = voices.find(v => 
-      (v.source === 'imported' && v.name === selectedChar.refAudioPath) ||
-      (v.source === 'generated' && `generated_${v.id}.wav` === selectedChar.refAudioPath)
-    );
+    const matchedVoice = voices.find(v => v.audioUrl === selectedChar.refAudioPath);
     if (matchedVoice) {
       currentVoiceId = matchedVoice.id;
     }
@@ -189,7 +186,7 @@ export const CharacterSettings: React.FC<CharacterSettingsProps> = ({ characters
                   <option value="">未設定</option>
                   {voices.map(v => (
                     <option key={v.id} value={v.id}>
-                      {v.source === 'imported' ? `📁 ${v.name}` : `🎲 自動生成 (${v.timestamp})`} - {v.text.substring(0, 15)}...
+                      {v.source === 'imported' ? `📁 ` : `🎲 `}{v.name} ({v.timestamp})
                     </option>
                   ))}
                   <option value="__new__">... (ボイスデザインで新規作成 / インポート)</option>

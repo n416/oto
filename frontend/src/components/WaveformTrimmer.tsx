@@ -78,7 +78,7 @@ export const WaveformTrimmer: React.FC<WaveformTrimmerProps> = ({ audioUrl, trim
     regions.on('region-out', (region) => {
       // リージョンの終了位置に達したら一時停止して先頭に戻る
       // ただし end が duration とほぼ同じ場合は finish イベントに任せる
-      if (ws.isPlaying() && region.end < ws.getDuration() - 0.05) {
+      if (ws.isPlaying() && ws.getCurrentTime() >= region.end - 0.05 && region.end < ws.getDuration() - 0.05) {
         ws.pause();
         ws.setTime(region.start);
       }
@@ -117,13 +117,14 @@ export const WaveformTrimmer: React.FC<WaveformTrimmerProps> = ({ audioUrl, trim
         const regions = regionsRef.current.getRegions();
         if (regions.length > 0) {
           const region = regions[0];
-          // 既にリージョンの終端付近にいる場合は先頭に戻す
+          // 既にリージョンの終端付近にいる場合、または左側にいる場合は region.play()
           if (wavesurferRef.current.getCurrentTime() >= region.end - 0.05) {
-            wavesurferRef.current.setTime(region.start);
+            region.play();
           } else if (wavesurferRef.current.getCurrentTime() < region.start) {
-            wavesurferRef.current.setTime(region.start);
+            region.play();
+          } else {
+            wavesurferRef.current.play();
           }
-          wavesurferRef.current.play();
         } else {
           wavesurferRef.current.play();
         }

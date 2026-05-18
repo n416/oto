@@ -32,21 +32,25 @@ export const useTimelineAudio = (
         // ボイス（テイク）の検索
         const blockId = `${layer.id}-${lineIndex}`;
         const takesData = lineTakesMap[blockId];
+        let hasActiveTake = false;
         if (takesData && takesData.activeTakeId) {
           const activeTake = takesData.takes.find(t => t.id === takesData.activeTakeId);
           if (activeTake && activeTake.audioUrl) {
             items.push({ url: activeTake.audioUrl, manualOffset: activeTake.trimOffset, manualEnd: activeTake.trimEnd });
+            hasActiveTake = true;
           }
         }
 
-        // SFXの検索
-        const sfxPattern = /SFX(\d{3}):[^\n]+/g;
-        let match;
-        while ((match = sfxPattern.exec(lineText)) !== null) {
-          const sfxId = `SFX${match[1]}`;
-          const sfx = sfxs.find(s => s.id === sfxId);
-          if (sfx && sfx.audioUrl) {
-            items.push({ url: sfx.audioUrl, manualOffset: sfx.trimOffset, manualEnd: sfx.trimEnd });
+        // SFXの検索 (SFXレイヤーでTakeがある場合は上書きとして扱い、ライブラリの音は鳴らさない)
+        if (!(layer.id === 'sfx' && hasActiveTake)) {
+          const sfxPattern = /SFX(\d{3}):[^\n]+/g;
+          let match;
+          while ((match = sfxPattern.exec(lineText)) !== null) {
+            const sfxId = `SFX${match[1]}`;
+            const sfx = sfxs.find(s => s.id === sfxId);
+            if (sfx && sfx.audioUrl) {
+              items.push({ url: sfx.audioUrl, manualOffset: sfx.trimOffset, manualEnd: sfx.trimEnd });
+            }
           }
         }
 

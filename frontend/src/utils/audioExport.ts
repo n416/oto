@@ -111,6 +111,7 @@ export async function exportWavFiles(
       const lineSeconds = lineIndex; // 1行 = 1秒
       
       const takesData = lineTakesMap[blockId];
+      let hasActiveTake = false;
       if (takesData && takesData.activeTakeId) {
         const activeTake = takesData.takes.find(t => t.id === takesData.activeTakeId);
         if (activeTake && activeTake.audioUrl) {
@@ -124,23 +125,26 @@ export async function exportWavFiles(
             timelineStartOffset: lineSeconds,
             layerName: layer.id
           });
+          hasActiveTake = true;
         }
       }
 
-      const sfxPattern = /SFX(\d{3}):([^\n]+)/g;
-      let match;
-      while ((match = sfxPattern.exec(lineText)) !== null) {
-        const sfxId = `SFX${match[1]}`;
-        const sfx = sfxs.find(s => s.id === sfxId);
-        if (sfx && sfx.audioUrl) {
-          filesToExport.push({
-            filename: `L${String(lineIndex + 1).padStart(3, '0')}_${layer.id}_${sfxId}.wav`,
-            url: sfx.audioUrl,
-            manualStart: sfx.trimOffset,
-            manualEnd: sfx.trimEnd,
-            timelineStartOffset: lineSeconds,
-            layerName: layer.id
-          });
+      if (!(layer.id === 'sfx' && hasActiveTake)) {
+        const sfxPattern = /SFX(\d{3}):([^\n]+)/g;
+        let match;
+        while ((match = sfxPattern.exec(lineText)) !== null) {
+          const sfxId = `SFX${match[1]}`;
+          const sfx = sfxs.find(s => s.id === sfxId);
+          if (sfx && sfx.audioUrl) {
+            filesToExport.push({
+              filename: `L${String(lineIndex + 1).padStart(3, '0')}_${layer.id}_${sfxId}.wav`,
+              url: sfx.audioUrl,
+              manualStart: sfx.trimOffset,
+              manualEnd: sfx.trimEnd,
+              timelineStartOffset: lineSeconds,
+              layerName: layer.id
+            });
+          }
         }
       }
     }

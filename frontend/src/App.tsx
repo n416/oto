@@ -3,6 +3,7 @@ import { Layout, Model, TabNode, Actions } from 'flexlayout-react';
 import type { IJsonModel } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css';
 import { SettingsModal } from './components/SettingsModal';
+import { BackendManagerModal } from './components/BackendManagerModal';
 import { CharacterSettings, type CharacterData } from './components/CharacterSettings';
 import { VoiceGenerator } from './components/VoiceGenerator';
 import { SfxGenerator } from './components/SfxGenerator';
@@ -41,6 +42,7 @@ export interface SfxData {
   source: 'generated' | 'imported';
   timestamp: string;
   trimOffset?: number; // 手動設定オフセット (秒)
+  trimEnd?: number; // 終了トリム位置 (秒)
 }
 
 interface ParsedBlock {
@@ -56,6 +58,7 @@ export interface TakeData {
   audioUrl: string;
   timestamp: string;
   trimOffset?: number; // 手動設定オフセット (秒)
+  trimEnd?: number; // 終了トリム位置 (秒)
 }
 
 export interface LineTakes {
@@ -150,6 +153,7 @@ function App() {
     return Model.fromJson(initialLayout);
   });
   const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
+  const [isBackendMenuOpen, setIsBackendMenuOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
   
@@ -1269,6 +1273,14 @@ function App() {
       <header style={{ padding: '8px 16px', borderBottom: '1px solid #333', backgroundColor: '#333333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
           <h1 style={{ margin: 0, fontSize: '14px', color: '#ccc' }}>Oto IDE</h1>
+          <button 
+            onClick={() => setIsBackendMenuOpen(true)}
+            style={{ background: 'none', border: '1px solid #4a5568', color: '#ccc', cursor: 'pointer', fontSize: '13px', padding: '4px 8px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}
+            onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#4a5568'; e.currentTarget.style.color = '#fff'; }}
+            onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.color = '#ccc'; }}
+          >
+            ⚙️ システム設定
+          </button>
           <div style={{ position: 'relative' }}>
             <button 
               onClick={(e) => {
@@ -1393,6 +1405,7 @@ function App() {
         lineTakesMap={lineTakesMap}
         setLineTakesMap={setLineTakesMap}
         characters={characters}
+        sfxs={sfxs}
         setDialog={setDialog}
       />
 
@@ -1509,6 +1522,8 @@ function App() {
           ))}
         </div>
       )}
+
+      <BackendManagerModal isOpen={isBackendMenuOpen} onClose={() => setIsBackendMenuOpen(false)} />
 
       {/* カスタムダイアログの実装 */}
       {dialog && (

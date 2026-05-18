@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "frontend",
+			"name": "Frontend"
+		},
+		{
+			"path": "backend/api_irodori",
+			"name": "API: Irodori-TTS"
+		},
+		{
+			"path": "backend/api_audiocraft",
+			"name": "API: AudioCraft"
+		},
+		{
+			"path": ".",
+			"name": "Oto Root"
+		}
+	],
+	"settings": {
+		"python.defaultInterpreterPath": "./backend/Irodori-TTS/.venv/Scripts/python.exe"
+	}
+}

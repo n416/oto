@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Client, handle_file } from '@gradio/client';
 import type { CharacterData } from './CharacterSettings';
-import type { LineTakes, TakeData, DialogOptions } from '../App';
+import type { LineTakes, TakeData, DialogOptions, SfxData } from '../App';
 import { WaveformTrimmer } from './WaveformTrimmer';
 
 interface SettingsModalProps {
@@ -14,11 +14,12 @@ interface SettingsModalProps {
   lineTakesMap: Record<string, LineTakes>;
   setLineTakesMap: React.Dispatch<React.SetStateAction<Record<string, LineTakes>>>;
   characters: CharacterData[];
+  sfxs: SfxData[];
   setDialog: (dialog: DialogOptions | null) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ 
-  isOpen, onClose, lineNumber, layer, text, blockId, lineTakesMap, setLineTakesMap, characters, setDialog 
+  isOpen, onClose, lineNumber, layer, text, blockId, lineTakesMap, setLineTakesMap, characters, sfxs, setDialog 
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
@@ -27,81 +28,143 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   if (!isOpen) return null;
 
   const currentTakesData = lineTakesMap[blockId] || { takes: [], activeTakeId: null };
-  const takes = currentTakesData.takes;
-  const activeTakeId = currentTakesData.activeTakeId;
+  let takes = [...currentTakesData.takes];
+  let activeTakeId = currentTakesData.activeTakeId;
+
+  // SFXレイヤーの場合、SFXライブラリのオリジナル音源を「Take 0」として追加する
+  if (layer === 'sfx') {
+    const match = text.match(/^SFX(\d{3}):/);
+    if (match) {
+      const sfxId = `SFX${match[1]}`;
+      const originalSfx = sfxs.find(s => s.id === sfxId);
+      if (originalSfx && originalSfx.audioUrl) {
+        const take0: TakeData = {
+          id: `take0_original_${sfxId}`,
+          audioUrl: originalSfx.audioUrl,
+          timestamp: originalSfx.timestamp || 'オリジナル',
+          trimOffset: originalSfx.trimOffset
+        };
+        takes = [...takes, take0];
+        // もしアクティブなテイクが設定されていない（または削除された）場合、Take 0をデフォルトにする
+        if (!activeTakeId) {
+          activeTakeId = take0.id;
+        }
+      }
+    }
+  }
 
   const handleGenerate = async () => {
-    if (layer !== 'dialogue') {
-      setDialog({ type: 'alert', title: '未対応', message: '現在、会話(Dialogue)レイヤーのみ生成に対応しています。' });
+    if (layer !== 'dialogue' && layer !== 'sfx') {
+      setDialog({ type: 'alert', title: '未対応', message: '現在、このレイヤーでの生成には対応していません。' });
       return;
     }
     
-    // キャラクター名とセリフを分離 ("XX: こんにちは" -> charName: "XX", speechText: "こんにちは")
-    const match = text.match(/^(.+?)[：:]\s*(.+)$/);
-    if (!match) {
-      setDialog({ type: 'alert', title: '形式エラー', message: 'テキストは「キャラID: セリフ」の形式で記述してください。（例: XX: こんにちは）' });
-      return;
-    }
-
-    const charId = match[1].trim();
-    const speechText = match[2].trim();
-
-    const character = characters.find(c => c.id === charId);
-    if (!character || !character.refAudioPath) {
-      setDialog({ type: 'alert', title: '設定エラー', message: `キャラクター「${charId}」が見つからないか、参考音声が割り当てられていません。ボイスライブラリから割り当てを行ってください。` });
-      return;
-    }
-
     setIsGenerating(true);
     try {
-      // 既存のURL/Blobからファイルデータを取得
-      const response = await fetch(character.refAudioPath);
-      const blob = await response.blob();
-      const file = new File([blob], "reference.wav", { type: "audio/wav" });
-
-      // ポート7860 (ボイスクローニング) に接続
-      const client = await Client.connect("http://127.0.0.1:7860/");
-      const result = await client.predict("/generate", [
-        "Aratako/Irodori-TTS-500M-v3", // checkpoint
-        "cuda", // model_device
-        "bf16", // model_precision
-        "cuda", // codec_device
-        "bf16", // codec_precision
-        speechText, // text
-        handle_file(file), // uploaded_audio (Fileを正しく処理するためhandle_fileを使用)
-        40, // num_steps
-        1, // num_candidates
-        "", // seed_raw
-        "", // seconds_raw
-        1.0, // duration_scale
-        "linear", // t_schedule_mode
-        -1.0, // sway_coeff
-        "independent", // cfg_guidance_mode
-        3.0, // cfg_scale_text
-        5.0, // cfg_scale_speaker
-        "", // cfg_scale_raw
-        0.5, // cfg_min_t
-        1.0, // cfg_max_t
-        true, // context_kv_cache
-        "", // truncation_factor_raw
-        "", // rescale_k_raw
-        "", // rescale_sigma_raw
-        "", // speaker_kv_scale_raw
-        "0.9", // speaker_kv_min_t_raw
-        "", // speaker_kv_max_layers_raw
-        "", // lora_adapter_raw
-      ]);
-
-      // @ts-ignore
-      const audioData = result.data?.[0];
-      const rawValue = (audioData && typeof audioData === "object" && audioData.__type__ === "update") ? audioData.value : audioData;
-      
       let audioUrl = "#";
-      if (typeof rawValue === "string") {
-        audioUrl = rawValue.startsWith("http") ? rawValue : `http://127.0.0.1:7860/file=${rawValue}`;
-      } else if (rawValue && typeof rawValue === "object") {
+
+      if (layer === 'dialogue') {
+        // キャラクター名とセリフを分離 ("XX: こんにちは" -> charName: "XX", speechText: "こんにちは")
+        const match = text.match(/^(.+?)[：:]\s*(.+)$/);
+        if (!match) {
+          setDialog({ type: 'alert', title: '形式エラー', message: 'テキストは「キャラID: セリフ」の形式で記述してください。（例: XX: こんにちは）' });
+          setIsGenerating(false);
+          return;
+        }
+
+        const charId = match[1].trim();
+        const speechText = match[2].trim();
+
+        const character = characters.find(c => c.id === charId);
+        if (!character || !character.refAudioPath) {
+          setDialog({ type: 'alert', title: '設定エラー', message: `キャラクター「${charId}」が見つからないか、参考音声が割り当てられていません。ボイスライブラリから割り当てを行ってください。` });
+          setIsGenerating(false);
+          return;
+        }
+
+        // 既存のURL/Blobからファイルデータを取得
+        const response = await fetch(character.refAudioPath);
+        const blob = await response.blob();
+        const file = new File([blob], "reference.wav", { type: "audio/wav" });
+
+        // ポート7860 (ボイスクローニング) に接続
+        const client = await Client.connect("http://127.0.0.1:7860/");
+        const result = await client.predict("/generate", [
+          "Aratako/Irodori-TTS-500M-v3", // checkpoint
+          "cuda", // model_device
+          "bf16", // model_precision
+          "cuda", // codec_device
+          "bf16", // codec_precision
+          speechText, // text
+          handle_file(file), // uploaded_audio (Fileを正しく処理するためhandle_fileを使用)
+          40, // num_steps
+          1, // num_candidates
+          "", // seed_raw
+          "", // seconds_raw
+          1.0, // duration_scale
+          "linear", // t_schedule_mode
+          -1.0, // sway_coeff
+          "independent", // cfg_guidance_mode
+          3.0, // cfg_scale_text
+          5.0, // cfg_scale_speaker
+          "", // cfg_scale_raw
+          0.5, // cfg_min_t
+          1.0, // cfg_max_t
+          true, // context_kv_cache
+          "", // truncation_factor_raw
+          "", // rescale_k_raw
+          "", // rescale_sigma_raw
+          "", // speaker_kv_scale_raw
+          "0.9", // speaker_kv_min_t_raw
+          "", // speaker_kv_max_layers_raw
+          "", // lora_adapter_raw
+        ]);
+
         // @ts-ignore
-        audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7860/file=${rawValue.path}` : "#");
+        const audioData = result.data?.[0];
+        const rawValue = (audioData && typeof audioData === "object" && audioData.__type__ === "update") ? audioData.value : audioData;
+        
+        if (typeof rawValue === "string") {
+          audioUrl = rawValue.startsWith("http") ? rawValue : `http://127.0.0.1:7860/file=${rawValue}`;
+        } else if (rawValue && typeof rawValue === "object") {
+          // @ts-ignore
+          audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7860/file=${rawValue.path}` : "#");
+        }
+
+      } else if (layer === 'sfx') {
+        // SFX000: どおおおおおおおんあああああ -> "どおおおおおおおんあああああ"
+        const match = text.match(/^(.+?)[：:]\s*(.+)$/);
+        let promptText = text;
+        if (match) {
+          promptText = match[2].trim();
+        }
+
+        const client = await Client.connect("http://127.0.0.1:7862/");
+        
+        // 生成前に自動翻訳を挟む (日本語が含まれている場合や、常に翻訳を通す)
+        let finalPrompt = promptText;
+        if (/[ぁ-んァ-ヶ亜-熙]/.test(promptText)) {
+          const transResult = await client.predict("/translate", [promptText]);
+          if (transResult.data?.[0]) {
+            finalPrompt = transResult.data[0] as string;
+          }
+        }
+
+        const result = await client.predict("/generate", [finalPrompt]);
+        
+        // @ts-ignore
+        const audioData = result.data?.[0];
+        
+        const rawValue = (audioData && typeof audioData === "object" && audioData.__type__ === "update") 
+          ? audioData.value 
+          : audioData;
+
+        if (typeof rawValue === "string") {
+          audioUrl = rawValue.startsWith("http") ? rawValue : `http://127.0.0.1:7862/file=${rawValue}`;
+        } else if (rawValue && typeof rawValue === "object") {
+          // @ts-ignore
+          audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7862/file=${rawValue.path}` : "#");
+        }
       }
 
       const newTake: TakeData = {
@@ -123,10 +186,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
     } catch (error) {
       console.error(error);
+      const port = layer === 'dialogue' ? '7860' : '7862';
+      const serverName = layer === 'dialogue' ? 'ボイスクローニングサーバー' : '効果音生成サーバー';
       setDialog({
         type: 'alert',
         title: '生成エラー',
-        message: 'クローニングサーバー(127.0.0.1:7860)との通信に失敗しました。もう一つの黒い画面で launch_voice_cloning.bat が起動しているか確認してください。'
+        message: `${serverName}(127.0.0.1:${port})との通信に失敗しました。上部メニューの「⚙️ システム設定」からサーバーが起動しているか確認してください。`
       });
     } finally {
       setIsGenerating(false);
@@ -233,9 +298,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onChange={(e) => setLineTakesMap(prev => ({ ...prev, [blockId]: { ...prev[blockId], activeTakeId: e.target.value } }))}
                 style={{ flex: 1, padding: '8px', backgroundColor: '#1e1e1e', color: '#fff', border: '1px solid #444', borderRadius: '4px' }}
               >
-                {takes.map((t, idx) => (
-                  <option key={t.id} value={t.id}>Take {takes.length - idx} ({t.timestamp})</option>
-                ))}
+                {takes.map((t, idx) => {
+                  if (t.id.startsWith('take0_original_')) {
+                    return <option key={t.id} value={t.id}>Take 0 (オリジナル)</option>;
+                  }
+                  // take0が含まれている場合、全体の長さから1を引いて計算する
+                  const baseLength = takes.some(take => take.id.startsWith('take0_original_')) ? takes.length - 1 : takes.length;
+                  return (
+                    <option key={t.id} value={t.id}>Take {baseLength - idx} ({t.timestamp})</option>
+                  );
+                })}
               </select>
               
               {activeTake && (
@@ -269,10 +341,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 trimEnd={activeTake.trimEnd}
                 onChangeOffset={(start, end) => {
                   setLineTakesMap(prev => {
-                    const existing = prev[blockId];
-                    if (!existing) return prev;
-                    const newTakes = existing.takes.map(t => t.id === activeTake.id ? { ...t, trimOffset: start, trimEnd: end } : t);
-                    return { ...prev, [blockId]: { ...existing, takes: newTakes } };
+                    const existing = prev[blockId] || { takes: [], activeTakeId: null };
+                    // 状態上のアクティブIDが未設定なら、現在のactiveTake.id（Take 0）と見なす
+                    const currentActiveId = existing.activeTakeId || activeTake.id;
+
+                    if (currentActiveId.startsWith('take0_original_')) {
+                      // オリジナルを編集しようとした場合、瞬時に新しいTakeとしてフォークする
+                      const newTake: TakeData = {
+                        id: `take_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                        audioUrl: activeTake.audioUrl,
+                        timestamp: new Date().toLocaleTimeString(),
+                        trimOffset: start,
+                        trimEnd: end
+                      };
+                      return {
+                        ...prev,
+                        [blockId]: {
+                          takes: [newTake, ...existing.takes],
+                          activeTakeId: newTake.id
+                        }
+                      };
+                    } else {
+                      // 既存のTakeを更新
+                      const newTakes = existing.takes.map(t => t.id === currentActiveId ? { ...t, trimOffset: start, trimEnd: end } : t);
+                      return { ...prev, [blockId]: { ...existing, takes: newTakes } };
+                    }
                   });
                 }}
               />

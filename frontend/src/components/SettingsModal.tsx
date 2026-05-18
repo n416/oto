@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Client, handle_file } from '@gradio/client';
 import type { CharacterData } from './CharacterSettings';
 import type { LineTakes, TakeData, DialogOptions } from '../App';
+import { WaveformTrimmer } from './WaveformTrimmer';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -253,6 +254,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               >
                 🗑️
               </button>
+            </div>
+          )}
+          
+          {/* 手動オフセット設定（テイクがある場合のみ表示） */}
+          {activeTake && (
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '8px' }}>
+                ✂️ 頭出し・カット位置の調整
+              </label>
+              <WaveformTrimmer 
+                audioUrl={activeTake.audioUrl}
+                trimOffset={activeTake.trimOffset}
+                trimEnd={activeTake.trimEnd}
+                onChangeOffset={(start, end) => {
+                  setLineTakesMap(prev => {
+                    const existing = prev[blockId];
+                    if (!existing) return prev;
+                    const newTakes = existing.takes.map(t => t.id === activeTake.id ? { ...t, trimOffset: start, trimEnd: end } : t);
+                    return { ...prev, [blockId]: { ...existing, takes: newTakes } };
+                  });
+                }}
+              />
             </div>
           )}
           

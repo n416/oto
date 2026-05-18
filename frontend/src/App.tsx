@@ -7,6 +7,8 @@ import { CharacterSettings, type CharacterData } from './components/CharacterSet
 import { VoiceGenerator } from './components/VoiceGenerator';
 import { SfxGenerator } from './components/SfxGenerator';
 import { PreviewPane } from './components/PreviewPane';
+import { useTimelineAudio } from './hooks/useTimelineAudio';
+import { exportWavFiles, type ExportMode } from './utils/audioExport';
 
 type LayerType = string;
 
@@ -38,6 +40,7 @@ export interface SfxData {
   audioUrl: string;
   source: 'generated' | 'imported';
   timestamp: string;
+  trimOffset?: number; // 手動設定オフセット (秒)
 }
 
 interface ParsedBlock {
@@ -52,6 +55,7 @@ export interface TakeData {
   id: string;
   audioUrl: string;
   timestamp: string;
+  trimOffset?: number; // 手動設定オフセット (秒)
 }
 
 export interface LineTakes {
@@ -146,12 +150,20 @@ function App() {
     return Model.fromJson(initialLayout);
   });
   const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [exportProgress, setExportProgress] = useState<string | null>(null);
   
   // --- カスタムダイアログ用ステート ---
   const [dialog, setDialog] = useState<DialogOptions | null>(null);
 
   // --- プロジェクト用ステート ---
-  const [lineTakesMap, setLineTakesMap] = useState<Record<string, LineTakes>>({});
+  const [lineTakesMap, setLineTakesMap] = useState<Record<string, LineTakes>>(() => {
+    const saved = localStorage.getItem('oto_ide_linetakes');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) {}
+    }
+    return {};
+  });
 
   const [cursorPos, setCursorPos] = useState<number | null>(null);
   const [sfxAutocomplete, setSfxAutocomplete] = useState<{ active: boolean, lineIndex: number, colIndex: number } | null>(null);
@@ -229,6 +241,20 @@ function App() {
     return [180, 360, 540, 720, 900, 1080, 1260, 1440];
   });
 
+  const GRID_HEIGHT = 60; // 1行あたりの高さ
+
+  // オーディオマネージャーの初期化
+  const { stopAll, tick } = useTimelineAudio(scripts, layers, sfxs, lineTakesMap);
+
+  // 再生ヘッドが動いた時、または再生状態が変わった時にオーディオを制御
+  useEffect(() => {
+    if (isPlaying) {
+      tick(playheadY / GRID_HEIGHT);
+    } else {
+      stopAll();
+    }
+  }, [playheadY, isPlaying, tick, stopAll]);
+
   // テキストが変更されるたびにローカルストレージに自動保存
   useEffect(() => {
     localStorage.setItem('oto_ide_scripts', JSON.stringify(scripts));
@@ -254,9 +280,13 @@ function App() {
     localStorage.setItem('oto_ide_sfxs', JSON.stringify(sfxs));
   }, [sfxs]);
 
+  useEffect(() => {
+    localStorage.setItem('oto_ide_linetakes', JSON.stringify(lineTakesMap));
+  }, [lineTakesMap]);
+
   // JSONファイルへの書き出し
   const handleExport = () => {
-    const projectData = { scripts, characters, cuts, layers, voices, sfxs };
+    const projectData = { scripts, characters, cuts, layers, voices, sfxs, lineTakesMap };
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(projectData, null, 2));
     const downloadNode = document.createElement('a');
     downloadNode.setAttribute("href", dataStr);
@@ -264,6 +294,19 @@ function App() {
     document.body.appendChild(downloadNode);
     downloadNode.click();
     downloadNode.remove();
+  };
+
+  const handleAudioExport = async (mode: ExportMode) => {
+    setIsExportMenuOpen(false);
+    try {
+      await exportWavFiles(scripts, layers, sfxs, lineTakesMap, mode, (msg) => {
+        setExportProgress(msg || null);
+      });
+    } catch (e) {
+      console.error(e);
+      setDialog({ type: 'alert', title: 'エラー', message: 'エクスポート中にエラーが発生しました。' });
+      setExportProgress(null);
+    }
   };
 
   // JSONファイルの読み込み
@@ -284,6 +327,7 @@ function App() {
           if (json.layers) setLayers(json.layers);
           if (json.voices) setVoices(json.voices);
           if (json.sfxs) setSfxs(json.sfxs);
+          if (json.lineTakesMap) setLineTakesMap(json.lineTakesMap);
         } else {
           setDialog({ type: 'alert', title: 'エラー', message: '対応していないファイル形式です。' });
         }
@@ -306,7 +350,7 @@ function App() {
     return () => window.removeEventListener('click', closeMenu);
   }, []);
 
-  const GRID_HEIGHT = 60; // 1行あたりの高さ
+  // GRID_HEIGHT is already defined above
 
   const maxLines = Math.max(
     ...layers.map(l => (scripts[l.id] || "").split('\n').length),
@@ -363,6 +407,27 @@ function App() {
       ...scripts,
       [layer]: lines.join('\n')
     });
+
+    // テイクデータも同期して入れ替える
+    setLineTakesMap(prev => {
+      const newMap = { ...prev };
+      const fromId = `${layer}-${fromIndex}`;
+      const toId = `${layer}-${toIndex}`;
+      const tempTake = newMap[toId];
+      
+      if (newMap[fromId]) {
+        newMap[toId] = newMap[fromId];
+      } else {
+        delete newMap[toId];
+      }
+      
+      if (tempTake) {
+        newMap[fromId] = tempTake;
+      } else {
+        delete newMap[fromId];
+      }
+      return newMap;
+    });
   };
 
   // タイムラインの右クリックメニューからの時間（行）の追加・削除処理
@@ -404,6 +469,46 @@ function App() {
       newScripts[layer.id] = lines.join('\n');
     });
     setScripts(newScripts);
+
+    // テイクデータも同期してシフトする
+    setLineTakesMap(prev => {
+      const newMap = { ...prev };
+      layers.forEach(layer => {
+        const layerId = layer.id;
+        const maxKeys = Object.keys(newMap)
+          .filter(k => k.startsWith(`${layerId}-`))
+          .map(k => parseInt(k.split('-')[1], 10));
+        
+        const maxLine = maxKeys.length > 0 ? Math.max(...maxKeys) : 0;
+        
+        if (isDelete) {
+          // 削除される範囲のテイクを消去
+          for (let i = 0; i < amount; i++) {
+            delete newMap[`${layerId}-${lineIndex + i}`];
+          }
+          // 以降のテイクを上に詰める
+          for (let i = lineIndex + amount; i <= maxLine; i++) {
+            const oldId = `${layerId}-${i}`;
+            const newId = `${layerId}-${i - amount}`;
+            if (newMap[oldId]) {
+              newMap[newId] = newMap[oldId];
+              delete newMap[oldId];
+            }
+          }
+        } else {
+          // 下にずらす（重複を避けるため下から処理）
+          for (let i = maxLine; i >= lineIndex + 1; i--) {
+            const oldId = `${layerId}-${i}`;
+            const newId = `${layerId}-${i + amount}`;
+            if (newMap[oldId]) {
+              newMap[newId] = newMap[oldId];
+              delete newMap[oldId];
+            }
+          }
+        }
+      });
+      return newMap;
+    });
 
     // カット（区切り線）のY座標の更新
     setCuts(prevCuts => {
@@ -589,6 +694,83 @@ function App() {
     isComposingRef.current = true;
   };
 
+  const updateScriptAndSync = (layerId: string, newText: string) => {
+    const oldText = scripts[layerId] || '';
+    if (oldText === newText) return;
+
+    setScripts(prev => ({ ...prev, [layerId]: newText }));
+
+    const oldLines = oldText.split('\n');
+    const newLines = newText.split('\n');
+    if (oldLines.length === newLines.length) return;
+
+    let prefixCount = 0;
+    while (prefixCount < oldLines.length && prefixCount < newLines.length && oldLines[prefixCount] === newLines[prefixCount]) {
+      prefixCount++;
+    }
+
+    let suffixCount = 0;
+    while (
+      suffixCount < oldLines.length - prefixCount &&
+      suffixCount < newLines.length - prefixCount &&
+      oldLines[oldLines.length - 1 - suffixCount] === newLines[newLines.length - 1 - suffixCount]
+    ) {
+      suffixCount++;
+    }
+
+    const removedCount = oldLines.length - prefixCount - suffixCount;
+    const addedCount = newLines.length - prefixCount - suffixCount;
+    const changeIndex = prefixCount;
+    const netShift = addedCount - removedCount;
+
+    if (netShift !== 0) {
+      setLineTakesMap(prev => {
+        const newMap = { ...prev };
+        const maxKeys = Object.keys(newMap)
+          .filter(k => k.startsWith(`${layerId}-`))
+          .map(k => parseInt(k.split('-')[1], 10));
+        const maxLine = maxKeys.length > 0 ? Math.max(...maxKeys) : 0;
+
+        if (addedCount === 0) {
+          // 純粋な削除（1行以上消した）
+          for (let i = 0; i < removedCount; i++) {
+            delete newMap[`${layerId}-${changeIndex + i}`];
+          }
+        } else if (removedCount > 0) {
+          // 置換・分割（changeIndex は維持、その後ろの消された分を削除）
+          for (let i = 1; i < removedCount; i++) {
+            delete newMap[`${layerId}-${changeIndex + i}`];
+          }
+        }
+
+        if (netShift < 0) {
+          // 上に詰める
+          const shiftAmount = -netShift;
+          for (let i = changeIndex + removedCount; i <= maxLine; i++) {
+            const oldId = `${layerId}-${i}`;
+            const newId = `${layerId}-${i - shiftAmount}`;
+            if (newMap[oldId]) {
+              newMap[newId] = newMap[oldId];
+              delete newMap[oldId];
+            }
+          }
+        } else if (netShift > 0) {
+          // 下にずらす
+          for (let i = maxLine; i >= changeIndex + removedCount; i--) {
+            const oldId = `${layerId}-${i}`;
+            const newId = `${layerId}-${i + netShift}`;
+            if (newMap[oldId]) {
+              newMap[newId] = newMap[oldId];
+              delete newMap[oldId];
+            }
+          }
+        }
+
+        return newMap;
+      });
+    }
+  };
+
   const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
     isComposingRef.current = false;
     const target = e.target as HTMLTextAreaElement;
@@ -599,7 +781,7 @@ function App() {
     if (updatedText !== newValue) {
       setCursorPos(cursor);
     }
-    setScripts(prev => ({ ...prev, [activeTab]: updatedText }));
+    updateScriptAndSync(activeTab, updatedText);
   };
 
   const handleScriptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -625,7 +807,7 @@ function App() {
     if (updatedText !== newValue) {
       setCursorPos(cursor);
     }
-    setScripts(prev => ({ ...prev, [activeTab]: updatedText }));
+    updateScriptAndSync(activeTab, updatedText);
   };
 
   useEffect(() => {
@@ -938,7 +1120,7 @@ function App() {
                     e.preventDefault();
                     if (dragOverIndex !== i) setDragOverIndex(i);
                   }}
-                  onDragLeave={(e) => {
+                  onDragLeave={() => {
                     if (dragOverIndex === i) setDragOverIndex(null);
                   }}
                   onDrop={(e) => {
@@ -1129,14 +1311,68 @@ function App() {
           </button>
           
           <label style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#444', color: 'white', border: '1px solid #555', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
-            📥 Import
+            📥 Import JSON
             <input type="file" accept=".json" onChange={handleImport} style={{ display: 'none' }} />
           </label>
           <button onClick={handleExport} style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#4a90e2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-            💾 Export
+            💾 Export JSON
           </button>
+          
+          <div style={{ position: 'relative', marginLeft: '8px' }}>
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsExportMenuOpen(!isExportMenuOpen);
+              }}
+              style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#e2a74a', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+            >
+              🎧 WAV一括出力 ▼
+            </button>
+            {isExportMenuOpen && (
+              <div style={{ position: 'absolute', top: '100%', right: 0, backgroundColor: '#2d3748', border: '1px solid #4a5568', borderRadius: '4px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', zIndex: 1000, minWidth: '240px', marginTop: '4px' }}>
+                <div 
+                  style={{ padding: '12px 16px', fontSize: '13px', color: '#e2e8f0', cursor: 'pointer', borderBottom: '1px solid #4a5568' }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  onClick={() => handleAudioExport('mixdown')}
+                >
+                  <strong>🎙️ タイムライン・ミックスダウン</strong>
+                  <div style={{ fontSize: '10px', color: '#a0aec0', marginTop: '4px' }}>全音声を配置通りに合成した1つのWAV</div>
+                </div>
+                <div 
+                  style={{ padding: '12px 16px', fontSize: '13px', color: '#e2e8f0', cursor: 'pointer', borderBottom: '1px solid #4a5568' }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  onClick={() => handleAudioExport('cropped')}
+                >
+                  <strong>✂️ 個別カット済WAV (ZIP)</strong>
+                  <div style={{ fontSize: '10px', color: '#a0aec0', marginTop: '4px' }}>ファイルごとの長さに切り抜きます</div>
+                </div>
+                <div 
+                  style={{ padding: '12px 16px', fontSize: '13px', color: '#e2e8f0', cursor: 'pointer' }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}
+                  onClick={() => handleAudioExport('stem')}
+                >
+                  <strong>📏 無音埋めステム (ZIP)</strong>
+                  <div style={{ fontSize: '10px', color: '#a0aec0', marginTop: '4px' }}>全ファイルが0秒開始になるよう頭を無音で埋めます</div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </header>
+
+      {/* エクスポート進捗オーバレイ */}
+      {exportProgress && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ backgroundColor: '#2d3748', padding: '24px 32px', borderRadius: '8px', textAlign: 'center', border: '1px solid #4a5568' }}>
+            <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff', marginBottom: '16px' }}>WAVファイル出力中...</div>
+            <div style={{ color: '#63b3ed', fontFamily: 'monospace', whiteSpace: 'pre-wrap', minHeight: '40px' }}>{exportProgress}</div>
+          </div>
+        </div>
+      )}
+
       <div style={{ flex: 1, position: 'relative' }}>
         <Layout 
           model={layoutModel} 

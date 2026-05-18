@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Client } from '@gradio/client';
 import type { DialogOptions } from '../App';
 import type { SfxData } from '../App';
+import { WaveformTrimmer } from './WaveformTrimmer';
 
 interface SfxGeneratorProps {
   sfxs: SfxData[];
@@ -126,7 +127,7 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const updateSfx = (id: string, field: keyof SfxData, value: string) => {
+  const updateSfx = <K extends keyof SfxData>(id: string, field: K, value: SfxData[K]) => {
     setSfxs(sfxs.map(s => s.id === id ? { ...s, [field]: value } : s));
   };
 
@@ -337,6 +338,23 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
                   <span style={{ fontSize: '12px', color: '#888' }}>
                     プロンプト: {sfx.prompt}
                   </span>
+                </div>
+
+                {/* 手動オフセット設定 */}
+                <div style={{ marginTop: '12px' }}>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '8px' }}>
+                    ✂️ 頭出し・カット位置の調整
+                  </label>
+                  <WaveformTrimmer 
+                    audioUrl={sfx.audioUrl}
+                    trimOffset={sfx.trimOffset}
+                    trimEnd={sfx.trimEnd}
+                    onChangeOffset={(start, end) => {
+                      // Note: updateSfx needs to be called twice or modified to accept multiple fields.
+                      // To keep it simple, we update one by one or create a new object.
+                      setSfxs(prev => prev.map(s => s.id === sfx.id ? { ...s, trimOffset: start, trimEnd: end } : s));
+                    }}
+                  />
                 </div>
               </div>
             ))

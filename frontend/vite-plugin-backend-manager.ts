@@ -2,6 +2,7 @@ import type { Plugin } from 'vite';
 import { spawn, ChildProcess, exec } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 import http from 'http';
 
@@ -111,6 +112,30 @@ export function backendManagerPlugin(): Plugin {
           } else {
             res.end(JSON.stringify({ logs: [] }));
           }
+          return;
+        }
+
+        if (req.method === 'POST' && req.url === '/api/backend/upload') {
+          let body = '';
+          req.on('data', chunk => body += chunk);
+          req.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              const uploadsDir = path.resolve(__dirname, 'public/uploads');
+              if (!fs.existsSync(uploadsDir)) {
+                fs.mkdirSync(uploadsDir, { recursive: true });
+              }
+              const safeName = Date.now() + '_' + data.filename.replace(/[^a-zA-Z0-9.\-_]/g, '');
+              const filePath = path.join(uploadsDir, safeName);
+              const buffer = Buffer.from(data.base64, 'base64');
+              fs.writeFileSync(filePath, buffer);
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ url: `/uploads/${safeName}` }));
+            } catch (err: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: err.toString() }));
+            }
+          });
           return;
         }
 

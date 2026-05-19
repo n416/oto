@@ -111,19 +111,37 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
     const file = e.target.files?.[0];
     if (!file) return;
     
-    const audioUrl = URL.createObjectURL(file);
-    const newId = getNextAvailableId();
-    
-    const newSfx: SfxData = {
-      id: newId,
-      name: file.name.replace(/\.[^/.]+$/, ""), // 拡張子を除いたファイル名を初期キャプションに
-      prompt: "（外部からインポートした効果音）",
-      audioUrl: audioUrl,
-      source: 'imported',
-      timestamp: new Date().toLocaleTimeString()
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const base64 = (reader.result as string).split(',')[1];
+        const res = await fetch('/api/backend/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, base64 })
+        });
+        
+        if (!res.ok) throw new Error('Upload failed');
+        const data = await res.json();
+        
+        const newId = getNextAvailableId();
+        const newSfx: SfxData = {
+          id: newId,
+          name: file.name.replace(/\.[^/.]+$/, ""), // 拡張子を除いたファイル名を初期キャプションに
+          prompt: "（外部からインポートした効果音）",
+          audioUrl: data.url,
+          source: 'imported',
+          timestamp: new Date().toLocaleTimeString()
+        };
+        
+        setSfxs(prev => [newSfx, ...prev]);
+      } catch (err) {
+        console.error(err);
+        setDialog({ type: 'alert', title: 'エラー', message: 'アップロードに失敗しました。' });
+      }
     };
+    reader.readAsDataURL(file);
     
-    setSfxs(prev => [newSfx, ...prev]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 

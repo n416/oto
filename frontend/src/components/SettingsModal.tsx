@@ -331,22 +331,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
-                const audioUrl = URL.createObjectURL(file);
-                const newTake: TakeData = {
-                  id: `take_imported_${Date.now()}`,
-                  audioUrl: audioUrl,
-                  timestamp: new Date().toLocaleTimeString()
+                
+                const reader = new FileReader();
+                reader.onload = async () => {
+                  try {
+                    const base64 = (reader.result as string).split(',')[1];
+                    const res = await fetch('/api/backend/upload', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ filename: file.name, base64 })
+                    });
+                    
+                    if (!res.ok) throw new Error('Upload failed');
+                    const data = await res.json();
+                    
+                    const newTake: TakeData = {
+                      id: `take_imported_${Date.now()}`,
+                      audioUrl: data.url,
+                      timestamp: new Date().toLocaleTimeString()
+                    };
+                    
+                    setLineTakesMap(prev => {
+                      const existing = prev[blockId] || { takes: [], activeTakeId: null };
+                      return {
+                        ...prev,
+                        [blockId]: {
+                          takes: [newTake, ...existing.takes],
+                          activeTakeId: newTake.id
+                        }
+                      };
+                    });
+                  } catch (err) {
+                    console.error(err);
+                    setDialog({ type: 'alert', title: 'アップロードエラー', message: '音声のアップロードに失敗しました。' });
+                  }
                 };
-                setLineTakesMap(prev => {
-                  const existing = prev[blockId] || { takes: [], activeTakeId: null };
-                  return {
-                    ...prev,
-                    [blockId]: {
-                      takes: [newTake, ...existing.takes],
-                      activeTakeId: newTake.id
-                    }
-                  };
-                });
+                reader.readAsDataURL(file);
+                
                 e.target.value = ''; // リセット
               }}
             />

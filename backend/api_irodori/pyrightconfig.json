@@ -1,0 +1,8 @@
+{
+  "venvPath": "c:/Users/nakam/Desktop/n416/oto/backend/api_irodori",
+  "venv": ".venv",
+  "extraPaths": [
+    "c:/Users/nakam/Desktop/n416/oto/backend/Irodori-TTS",
+    "c:/Users/nakam/Desktop/n416/oto/backend/api_irodori/.venv/Lib/site-packages"
+  ]
+}

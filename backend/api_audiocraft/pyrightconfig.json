@@ -1,0 +1,8 @@
+{
+  "venvPath": "c:/Users/nakam/Desktop/n416/oto/backend/api_audiocraft",
+  "venv": ".venv",
+  "extraPaths": [
+    "c:/Users/nakam/Desktop/n416/oto/backend/audiocraft",
+    "c:/Users/nakam/Desktop/n416/oto/backend/api_audiocraft/.venv/Lib/site-packages"
+  ]
+}

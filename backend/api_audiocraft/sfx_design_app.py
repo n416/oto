@@ -27,7 +27,7 @@ def generate_sfx(prompt):
     filename = f"../../outputs/sfx/sfx_{uuid.uuid4().hex[:8]}.wav"
     
     # 保存
-    torchaudio.save(filename, one_wav.cpu(), model.sample_rate)
+    torchaudio.save(filename, one_wav.cpu(), model.sample_rate)  # type: ignore
     print(f"生成完了: {filename}")
     return filename
 

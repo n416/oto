@@ -1,0 +1,6 @@
+{
+  "exclude": [
+    "backend/api_irodori",
+    "backend/api_audiocraft"
+  ]
+}

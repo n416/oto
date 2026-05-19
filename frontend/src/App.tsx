@@ -10,6 +10,7 @@ import { SfxGenerator } from './components/SfxGenerator';
 import { PreviewPane } from './components/PreviewPane';
 import { useTimelineAudio } from './hooks/useTimelineAudio';
 import { exportWavFiles, type ExportMode } from './utils/audioExport';
+import { generateTake } from './utils/generateTake';
 
 type LayerType = string;
 
@@ -156,6 +157,7 @@ function App() {
   const [isBackendMenuOpen, setIsBackendMenuOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ current: number, total: number } | null>(null);
   
   // --- カスタムダイアログ用ステート ---
   const [dialog, setDialog] = useState<DialogOptions | null>(null);
@@ -854,6 +856,54 @@ function App() {
 
   const visibleLayers = layers.filter(l => l.visibleInTimeline);
 
+  const handleBatchGenerate = async () => {
+    const blocksToGenerate = timelineBlocks.filter(block => {
+      if (block.layer !== 'dialogue' && block.layer !== 'sfx') return false;
+      const takesData = lineTakesMap[block.id];
+      const hasActiveTake = takesData && takesData.activeTakeId;
+      const isSfxOriginal = block.layer === 'sfx' && /^SFX(\d{3}):/.test(block.text);
+      return !hasActiveTake && !isSfxOriginal;
+    });
+
+    if (blocksToGenerate.length === 0) {
+      setDialog({ type: 'alert', title: '一括生成', message: '未生成のブロックはありません。' });
+      return;
+    }
+
+    setBatchProgress({ current: 0, total: blocksToGenerate.length });
+    let successCount = 0;
+
+    for (let i = 0; i < blocksToGenerate.length; i++) {
+      const block = blocksToGenerate[i];
+      setBatchProgress({ current: i + 1, total: blocksToGenerate.length });
+      
+      try {
+        const fullScript = scripts[block.layer] || '';
+        const newTake = await generateTake(block.layer, block.text, characters, fullScript, block.lineIndex);
+        
+        setLineTakesMap(prev => {
+          const existing = prev[block.id] || { takes: [], activeTakeId: null };
+          return {
+            ...prev,
+            [block.id]: {
+              takes: [newTake, ...existing.takes],
+              activeTakeId: newTake.id
+            }
+          };
+        });
+        successCount++;
+      } catch (error: any) {
+        console.error(error);
+        if (!window.confirm(`ブロック(L${block.lineIndex + 1}: ${block.text})の生成に失敗しました。継続しますか？\n\nエラー詳細: ${error.message}`)) {
+          break;
+        }
+      }
+    }
+    
+    setBatchProgress(null);
+    setDialog({ type: 'alert', title: '一括生成完了', message: `${successCount} 件のテイクを生成しました。` });
+  };
+
   // ----------------------------------------------------
   // IDEの各ペイン（タブ）の中身を生成するファクトリー関数
   // ----------------------------------------------------
@@ -1225,6 +1275,11 @@ function App() {
                 const widthPercentage = 100 / visibleLayers.length;
                 const leftPercentage = layerIndex * widthPercentage;
 
+                const takesData = lineTakesMap[block.id];
+                const hasActiveTake = takesData && takesData.activeTakeId;
+                const isSfxOriginal = block.layer === 'sfx' && /^SFX(\d{3}):/.test(block.text);
+                const hasTake = hasActiveTake || isSfxOriginal || block.layer === 'bgm';
+
                 return (
                   <div 
                     key={block.id}
@@ -1242,7 +1297,11 @@ function App() {
                       height: `${GRID_HEIGHT - 8}px`, 
                       left: `${leftPercentage}%`, 
                       width: `${widthPercentage - 1}%`, // slightly smaller to leave gap
-                      backgroundColor: block.color + '25', // Add transparency (25 hex = ~15%)
+                      backgroundColor: hasTake ? block.color + '25' : 'transparent',
+                      backgroundImage: hasTake ? 'none' : `repeating-linear-gradient(45deg, ${block.color}10, ${block.color}10 10px, transparent 10px, transparent 20px)`,
+                      borderTop: hasTake ? 'none' : `1px dashed ${block.color}50`,
+                      borderRight: hasTake ? 'none' : `1px dashed ${block.color}50`,
+                      borderBottom: hasTake ? 'none' : `1px dashed ${block.color}50`,
                       borderLeft: `3px solid ${block.color}`, 
                       padding: '4px 8px', 
                       borderRadius: '2px', 
@@ -1257,6 +1316,7 @@ function App() {
                     onMouseEnter={(e) => e.currentTarget.style.filter = 'brightness(1.5)'}
                     onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
                   >
+                    {!hasTake && <span style={{ marginRight: '4px', fontSize: '10px' }} title="テイクが生成されていません">⚠️</span>}
                     {block.text}
                   </div>
                 );
@@ -1315,6 +1375,13 @@ function App() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button 
+            onClick={handleBatchGenerate}
+            style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            🎲 未生成を一括生成
+          </button>
+          
           <button 
             onClick={handlePlayToggle}
             style={{ padding: '4px 16px', fontSize: '12px', backgroundColor: isPlaying ? '#e74c3c' : '#2ecc71', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', marginRight: '16px' }}
@@ -1385,6 +1452,15 @@ function App() {
         </div>
       )}
 
+      {batchProgress && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ backgroundColor: '#2d3748', padding: '24px 32px', borderRadius: '8px', textAlign: 'center', border: '1px solid #4a5568' }}>
+            <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff', marginBottom: '16px' }}>テイク一括生成中... ({batchProgress.current} / {batchProgress.total})</div>
+            <div style={{ color: '#63b3ed', fontFamily: 'monospace', whiteSpace: 'pre-wrap', minHeight: '40px' }}>しばらくお待ちください...</div>
+          </div>
+        </div>
+      )}
+
       <div style={{ flex: 1, position: 'relative' }}>
         <Layout 
           model={layoutModel} 
@@ -1401,6 +1477,7 @@ function App() {
         lineNumber={selectedLine} 
         layer={activeTab}
         text={selectedLine ? (scripts[activeTab] || '').split('\n')[selectedLine - 1] : ''}
+        fullScript={scripts[activeTab] || ''}
         blockId={selectedLine ? `${activeTab}-${selectedLine - 1}` : ''}
         lineTakesMap={lineTakesMap}
         setLineTakesMap={setLineTakesMap}

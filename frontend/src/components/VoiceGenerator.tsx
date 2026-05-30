@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Client } from '@gradio/client';
+
 import type { CharacterData } from './CharacterSettings';
 import type { VoiceData, DialogOptions } from '../App';
 
@@ -24,53 +24,17 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
     setIsGenerating(true);
     
     try {
-      const client = await Client.connect("http://127.0.0.1:7861/");
-      const result = await client.predict("/generate", [
-        "Aratako/Irodori-TTS-500M-v2-VoiceDesign", // checkpoint
-        "cuda", // model_device
-        "bf16", // model_precision
-        "cuda", // codec_device
-        "bf16", // codec_precision
-        speechText, // text
-        voicePrompt, // caption
-        40, // num_steps
-        1, // num_candidates
-        "", // seed_raw
-        "", // seconds_raw
-        1.0, // duration_scale
-        "linear", // t_schedule_mode
-        -1.0, // sway_coeff
-        "independent", // cfg_guidance_mode
-        2.0, // cfg_scale_text
-        4.0, // cfg_scale_caption
-        "", // cfg_scale_raw
-        0.5, // cfg_min_t
-        1.0, // cfg_max_t
-        true, // context_kv_cache
-        "", // max_text_len_raw
-        "", // max_caption_len_raw
-        "", // truncation_factor_raw
-        "", // rescale_k_raw
-        "", // rescale_sigma_raw
-        "", // lora_adapter_raw
-      ]);
-
-      // @ts-ignore
-      const audioData = result.data?.[0]; // num_candidates=1なので最初の要素
-      console.log("Gradio API Response audioData:", audioData);
-      
-      let audioUrl = "#";
-      // Gradioの gr.update() 形式に対応
-      const rawValue = (audioData && typeof audioData === "object" && audioData.__type__ === "update") 
-        ? audioData.value 
-        : audioData;
-
-      if (typeof rawValue === "string") {
-        audioUrl = rawValue.startsWith("http") ? rawValue : `http://127.0.0.1:7861/file=${rawValue}`;
-      } else if (rawValue && typeof rawValue === "object") {
-        // @ts-ignore
-        audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7861/file=${rawValue.path}` : "#");
-      }
+      const res = await fetch("http://127.0.0.1:7861/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: speechText,
+          caption: voicePrompt
+        })
+      });
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const resultData = await res.json();
+      let audioUrl = resultData.urls?.[0] || "#";
 
       try {
         const audioRes = await fetch(audioUrl);

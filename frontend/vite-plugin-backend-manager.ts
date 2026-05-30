@@ -24,7 +24,7 @@ const servers: ServerConfig[] = [
     name: 'ボイスクローニング (Irodori-TTS)',
     cwd: path.resolve(__dirname, '../backend/api_irodori'),
     command: 'cmd.exe',
-    args: ['/c', '..\\Irodori-TTS\\.venv\\Scripts\\python.exe', 'irodori_cloning_app.py', '--server-name', '0.0.0.0', '--server-port', '7860'],
+    args: ['/c', '..\\Irodori-TTS\\.venv\\Scripts\\python.exe', 'irodori_cloning_app.py'],
     port: 7860
   },
   {
@@ -32,7 +32,7 @@ const servers: ServerConfig[] = [
     name: 'ボイスデザイン (Irodori-TTS)',
     cwd: path.resolve(__dirname, '../backend/api_irodori'),
     command: 'cmd.exe',
-    args: ['/c', '..\\Irodori-TTS\\.venv\\Scripts\\python.exe', 'irodori_design_app.py', '--server-name', '0.0.0.0', '--server-port', '7861'],
+    args: ['/c', '..\\Irodori-TTS\\.venv\\Scripts\\python.exe', 'irodori_design_app.py'],
     port: 7861
   },
   {
@@ -81,37 +81,40 @@ export function backendManagerPlugin(): Plugin {
           return next();
         }
 
-        if (req.method === 'GET' && req.url === '/api/backend/status') {
-          res.setHeader('Content-Type', 'application/json');
+        if (req.method === 'GET' && req.url === '/api/backend/stream') {
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Connection', 'keep-alive');
           
-          const statusPromises = servers.map(async (s) => {
-            const isAlive = !!runningProcesses[s.id];
-            let state = 'stopped';
-            if (isAlive) {
-              const isReady = await checkPort(s.port);
-              state = isReady ? 'ready' : 'starting';
+          const sendUpdate = async () => {
+            try {
+              const statusPromises = servers.map(async (s) => {
+                const isAlive = !!runningProcesses[s.id];
+                let state = 'stopped';
+                if (isAlive) {
+                  const isReady = await checkPort(s.port);
+                  state = isReady ? 'ready' : 'starting';
+                }
+                return {
+                  id: s.id,
+                  name: s.name,
+                  state: state,
+                  logs: serverLogs[s.id] ? serverLogs[s.id].join('') : ''
+                };
+              });
+              const status = await Promise.all(statusPromises);
+              res.write(`data: ${JSON.stringify(status)}\n\n`);
+            } catch (err) {
+              // ignore
             }
-            return {
-              id: s.id,
-              name: s.name,
-              state: state
-            };
+          };
+
+          sendUpdate();
+          const interval = setInterval(sendUpdate, 2000);
+
+          req.on('close', () => {
+            clearInterval(interval);
           });
-
-          const status = await Promise.all(statusPromises);
-          res.end(JSON.stringify(status));
-          return;
-        }
-
-        if (req.method === 'GET' && req.url.startsWith('/api/backend/logs')) {
-          const urlParams = new URL(req.url, `http://${req.headers.host}`);
-          const id = urlParams.searchParams.get('id');
-          res.setHeader('Content-Type', 'application/json');
-          if (id && serverLogs[id]) {
-            res.end(JSON.stringify({ logs: serverLogs[id] }));
-          } else {
-            res.end(JSON.stringify({ logs: [] }));
-          }
           return;
         }
 

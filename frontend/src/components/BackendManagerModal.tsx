@@ -16,45 +16,32 @@ export const BackendManagerModal: React.FC<BackendManagerModalProps> = ({ isOpen
   const [isLoading, setIsLoading] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<Record<string, string>>({});
 
-  const fetchStatus = async () => {
-    try {
-      const res = await fetch('/api/backend/status');
-      if (res.ok) {
-        const data = await res.json();
-        setServers(data);
-      }
-    } catch (e) {
-      console.error('Failed to fetch backend status:', e);
-    }
-  };
-
-  const fetchLogs = async (id: string) => {
-    try {
-      const res = await fetch(`/api/backend/logs?id=${id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setLogs(prev => ({ ...prev, [id]: (data.logs || []).join('') }));
-      }
-    } catch (e) {
-      // ignore
-    }
-  };
-
   useEffect(() => {
     if (isOpen) {
-      fetchStatus();
-      servers.forEach(s => {
-        if (s.state !== 'stopped') fetchLogs(s.id);
-      });
-      const interval = setInterval(() => {
-        fetchStatus();
-        servers.forEach(s => {
-          if (s.state !== 'stopped') fetchLogs(s.id);
-        });
-      }, 3000);
-      return () => clearInterval(interval);
+      const eventSource = new EventSource('/api/backend/stream');
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setServers(data.map((s: any) => ({ id: s.id, name: s.name, state: s.state })));
+          
+          const newLogs: Record<string, string> = {};
+          data.forEach((s: any) => {
+            if (s.state !== 'stopped' && s.logs) {
+              newLogs[s.id] = s.logs;
+            }
+          });
+          setLogs(newLogs);
+        } catch (e) {
+          console.error('Failed to parse SSE data', e);
+        }
+      };
+
+      return () => {
+        eventSource.close();
+      };
     }
-  }, [isOpen, servers]);
+  }, [isOpen]);
 
   const toggleServer = async (id: string, currentState: string) => {
     setIsLoading(prev => ({ ...prev, [id]: true }));
@@ -65,8 +52,7 @@ export const BackendManagerModal: React.FC<BackendManagerModalProps> = ({ isOpen
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id })
       });
-      // 起動/停止の反映に少しラグがあるため、1秒後に再フェッチ
-      setTimeout(fetchStatus, 1000);
+      // SSEが自動的に新しいステータスを受信します
     } catch (e) {
       console.error('Failed to toggle server:', e);
     } finally {

@@ -5,14 +5,14 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-import gradio as gr
 from huggingface_hub import hf_hub_download
 
 import sys
 import os
+import tempfile
+import shutil
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../Irodori-TTS")))
 
-from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_CSS, build_emoji_palette
 from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
@@ -24,8 +24,7 @@ from irodori_tts.inference_runtime import (
     save_wav,
 )
 
-MAX_GRADIO_CANDIDATES = 32
-GRADIO_AUDIO_COLS_PER_ROW = 8
+
 
 
 def _default_checkpoint() -> str:
@@ -52,18 +51,7 @@ def _precision_choices_for_device(device: str) -> list[str]:
     return list_available_runtime_precisions(device)
 
 
-def _on_model_device_change(device: str) -> gr.Dropdown:
-    choices = _precision_choices_for_device(device)
-    return gr.Dropdown(choices=choices, value=choices[0])
 
-
-def _on_codec_device_change(device: str) -> gr.Dropdown:
-    choices = _precision_choices_for_device(device)
-    return gr.Dropdown(choices=choices, value=choices[0])
-
-
-def _on_t_schedule_mode_change(mode: str) -> object:
-    return gr.update(interactive=str(mode).strip().lower() == "sway")
 
 
 def _parse_optional_float(raw: str | None, label: str) -> float | None:
@@ -223,8 +211,8 @@ def _run_generation(
     requested_candidates = int(num_candidates)
     if requested_candidates <= 0:
         raise ValueError("num_candidates must be >= 1.")
-    if requested_candidates > MAX_GRADIO_CANDIDATES:
-        raise ValueError(f"num_candidates must be <= {MAX_GRADIO_CANDIDATES}.")
+    if requested_candidates > 32:
+        raise ValueError(f"num_candidates must be <= 32.")
 
     cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
     truncation_factor = _parse_optional_float(truncation_factor_raw, "truncation_factor")
@@ -326,273 +314,112 @@ def _run_generation(
     timing_text = _format_timings(result.stage_timings, result.total_to_decode)
     stdout_log(f"[gradio] saved {len(out_paths)} candidates")
 
-    audio_updates: list[object] = []
-    for i in range(MAX_GRADIO_CANDIDATES):
-        if i < len(out_paths):
-            audio_updates.append(gr.update(value=out_paths[i], visible=True))
-        else:
-            audio_updates.append(gr.update(value=None, visible=False))
-    return (*audio_updates, detail_text, timing_text)
+    return [str(p) for p in out_paths]
 
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from typing import List
+import uvicorn
 
-def _clear_runtime_cache() -> str:
-    clear_cached_runtime()
-    return "cleared loaded model from memory"
+app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def build_ui() -> gr.Blocks:
-    default_checkpoint = _default_checkpoint()
-    default_model_device = _default_model_device()
-    default_codec_device = _default_codec_device()
-    device_choices = list_available_runtime_devices()
-    model_precision_choices = _precision_choices_for_device(default_model_device)
-    codec_precision_choices = _precision_choices_for_device(default_codec_device)
+out_dir_path = Path("../../outputs")
+out_dir_path.mkdir(parents=True, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory="../../outputs"), name="outputs")
 
-    with gr.Blocks(title="Irodori-TTS Gradio") as demo:
-        gr.Markdown("# Irodori-TTS 推論 (Cached Runtime)")
-        gr.Markdown(
-            "設定が変更されない場合、ランタイムは再利用され、サンプリング/デコーディングのみが実行されます。"
+@app.get("/")
+def api_root():
+    return {"status": "ok"}
+
+@app.post("/generate")
+def api_generate(
+    uploaded_audio: UploadFile = File(None),
+    checkpoint: str = Form("Aratako/Irodori-TTS-500M-v3"),
+    model_device: str = Form("cuda"),
+    model_precision: str = Form("bf16"),
+    codec_device: str = Form("cuda"),
+    codec_precision: str = Form("bf16"),
+    text: str = Form(...),
+    num_steps: int = Form(40),
+    num_candidates: int = Form(1),
+    seed_raw: str = Form(""),
+    seconds_raw: str = Form(""),
+    duration_scale: float = Form(1.0),
+    t_schedule_mode: str = Form("linear"),
+    sway_coeff: float = Form(-1.0),
+    cfg_guidance_mode: str = Form("independent"),
+    cfg_scale_text: float = Form(3.0),
+    cfg_scale_speaker: float = Form(5.0),
+    cfg_scale_raw: str = Form(""),
+    cfg_min_t: float = Form(0.5),
+    cfg_max_t: float = Form(1.0),
+    context_kv_cache: bool = Form(True),
+    truncation_factor_raw: str = Form(""),
+    rescale_k_raw: str = Form(""),
+    rescale_sigma_raw: str = Form(""),
+    speaker_kv_scale_raw: str = Form(""),
+    speaker_kv_min_t_raw: str = Form("0.9"),
+    speaker_kv_max_layers_raw: str = Form(""),
+    lora_adapter_raw: str = Form("")
+):
+    tmp_path = None
+    if uploaded_audio and uploaded_audio.filename:
+        suffix = Path(uploaded_audio.filename).suffix
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, 'wb') as f:
+            shutil.copyfileobj(uploaded_audio.file, f)
+
+    try:
+        out_paths = _run_generation(
+            checkpoint=checkpoint,
+            model_device=model_device,
+            model_precision=model_precision,
+            codec_device=codec_device,
+            codec_precision=codec_precision,
+            text=text,
+            uploaded_audio=tmp_path,
+            num_steps=num_steps,
+            num_candidates=num_candidates,
+            seed_raw=seed_raw,
+            seconds_raw=seconds_raw,
+            duration_scale=duration_scale,
+            t_schedule_mode=t_schedule_mode,
+            sway_coeff=sway_coeff,
+            cfg_guidance_mode=cfg_guidance_mode,
+            cfg_scale_text=cfg_scale_text,
+            cfg_scale_speaker=cfg_scale_speaker,
+            cfg_scale_raw=cfg_scale_raw,
+            cfg_min_t=cfg_min_t,
+            cfg_max_t=cfg_max_t,
+            context_kv_cache=context_kv_cache,
+            truncation_factor_raw=truncation_factor_raw,
+            rescale_k_raw=rescale_k_raw,
+            rescale_sigma_raw=rescale_sigma_raw,
+            speaker_kv_scale_raw=speaker_kv_scale_raw,
+            speaker_kv_min_t_raw=speaker_kv_min_t_raw,
+            speaker_kv_max_layers_raw=speaker_kv_max_layers_raw,
+            lora_adapter_raw=lora_adapter_raw,
         )
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
-        with gr.Row():
-            checkpoint = gr.Textbox(
-                label="モデル (.pt/.safetensors または HF repo id)",
-                value=default_checkpoint,
-                scale=4,
-            )
-            model_device = gr.Dropdown(
-                label="モデル 実行デバイス",
-                choices=device_choices,
-                value=default_model_device,
-                scale=1,
-            )
-            model_precision = gr.Dropdown(
-                label="モデル 精度",
-                choices=model_precision_choices,
-                value=model_precision_choices[0],
-                scale=1,
-            )
-            codec_device = gr.Dropdown(
-                label="コーデック 実行デバイス",
-                choices=device_choices,
-                value=default_codec_device,
-                scale=1,
-            )
-            codec_precision = gr.Dropdown(
-                label="コーデック 精度",
-                choices=codec_precision_choices,
-                value=codec_precision_choices[0],
-                scale=1,
-            )
-
-        with gr.Row():
-            load_model_btn = gr.Button("モデルを読み込む")
-            clear_cache_btn = gr.Button("モデルを解放する")
-            clear_cache_msg = gr.Textbox(label="モデル状態", interactive=False)
-
-        with gr.Column():
-            text = gr.Textbox(
-                label="読み上げテキスト",
-                lines=6,
-                elem_id="irodori-text-input",
-            )
-            build_emoji_palette(text, open=False)
-        uploaded_audio = gr.Audio(
-            label="お手本音声のアップロード (任意、空欄の場合は音声なし推論)",
-            type="filepath",
-        )
-
-        with gr.Accordion("サンプリング設定", open=True):
-            with gr.Row():
-                num_steps = gr.Slider(label="ステップ数 (Num Steps)", minimum=1, maximum=120, value=40, step=1)
-                num_candidates = gr.Slider(
-                    label="生成候補数",
-                    minimum=1,
-                    maximum=MAX_GRADIO_CANDIDATES,
-                    value=1,
-                    step=1,
-                )
-                seed_raw = gr.Textbox(label="シード値 (空欄でランダム)", value="")
-                seconds_raw = gr.Textbox(label="生成秒数 (空欄で自動)", value="")
-                duration_scale = gr.Slider(
-                    label="長さスケール (Duration Scale)",
-                    minimum=0.5,
-                    maximum=1.5,
-                    value=1.0,
-                    step=0.01,
-                )
-
-            with gr.Row():
-                t_schedule_mode = gr.Dropdown(
-                    label="タイムスケジュール",
-                    choices=["linear", "sway"],
-                    value="linear",
-                )
-                sway_coeff = gr.Slider(
-                    label="Sway 係数",
-                    minimum=-1.0,
-                    maximum=1.5,
-                    value=-1.0,
-                    step=0.1,
-                    interactive=False,
-                )
-
-            with gr.Row():
-                cfg_guidance_mode = gr.Dropdown(
-                    label="CFG ガイダンスモード",
-                    choices=["independent", "joint", "alternating"],
-                    value="independent",
-                )
-                cfg_scale_text = gr.Slider(
-                    label="テキスト CFG スケール",
-                    minimum=0.0,
-                    maximum=10.0,
-                    value=3.0,
-                    step=0.1,
-                )
-                cfg_scale_speaker = gr.Slider(
-                    label="話者 CFG スケール",
-                    minimum=0.0,
-                    maximum=10.0,
-                    value=5.0,
-                    step=0.1,
-                )
-
-        with gr.Accordion("詳細設定 (任意)", open=False):
-            cfg_scale_raw = gr.Textbox(label="CFG スケール上書き (任意)", value="")
-            with gr.Row():
-                cfg_min_t = gr.Number(label="CFG 最小 t", value=0.5)
-                cfg_max_t = gr.Number(label="CFG 最大 t", value=1.0)
-                context_kv_cache = gr.Checkbox(label="コンテキスト KV キャッシュ", value=True)
-            with gr.Row():
-                truncation_factor_raw = gr.Textbox(label="トランケーション係数 (任意)", value="")
-                rescale_k_raw = gr.Textbox(label="リスケール k (任意)", value="")
-                rescale_sigma_raw = gr.Textbox(label="リスケール sigma (任意)", value="")
-            with gr.Row():
-                speaker_kv_scale_raw = gr.Textbox(label="話者 KV スケール (任意)", value="")
-                speaker_kv_min_t_raw = gr.Textbox(label="話者 KV 最小 t (任意)", value="0.9")
-                speaker_kv_max_layers_raw = gr.Textbox(
-                    label="話者 KV 最大レイヤー (任意)", value=""
-                )
-            lora_adapter_raw = gr.Textbox(label="LoRA アダプターディレクトリ (任意)", value="")
-
-        generate_btn = gr.Button("音声の生成 (Generate)", variant="primary")
-
-        out_audios: list[gr.Audio] = []
-        num_rows = (
-            MAX_GRADIO_CANDIDATES + GRADIO_AUDIO_COLS_PER_ROW - 1
-        ) // GRADIO_AUDIO_COLS_PER_ROW
-        with gr.Column():
-            for row_idx in range(num_rows):
-                with gr.Row():
-                    for col_idx in range(GRADIO_AUDIO_COLS_PER_ROW):
-                        i = row_idx * GRADIO_AUDIO_COLS_PER_ROW + col_idx
-                        if i >= MAX_GRADIO_CANDIDATES:
-                            break
-                        out_audios.append(
-                            gr.Audio(
-                                label=f"生成された音声 {i + 1}",
-                                type="filepath",
-                                interactive=False,
-                                visible=(i == 0),
-                                min_width=160,
-                            )
-                        )
-        out_log = gr.Textbox(label="実行ログ (Run Log)", lines=8)
-        out_timing = gr.Textbox(label="処理時間 (Timing)", lines=8)
-
-        generate_btn.click(
-            _run_generation,
-            inputs=[
-                checkpoint,
-                model_device,
-                model_precision,
-                codec_device,
-                codec_precision,
-                text,
-                uploaded_audio,
-                num_steps,
-                num_candidates,
-                seed_raw,
-                seconds_raw,
-                duration_scale,
-                t_schedule_mode,
-                sway_coeff,
-                cfg_guidance_mode,
-                cfg_scale_text,
-                cfg_scale_speaker,
-                cfg_scale_raw,
-                cfg_min_t,
-                cfg_max_t,
-                context_kv_cache,
-                truncation_factor_raw,
-                rescale_k_raw,
-                rescale_sigma_raw,
-                speaker_kv_scale_raw,
-                speaker_kv_min_t_raw,
-                speaker_kv_max_layers_raw,
-                lora_adapter_raw,
-            ],
-            outputs=[*out_audios, out_log, out_timing],
-            api_name="generate",
-        )
-        model_device.change(
-            _on_model_device_change, inputs=[model_device], outputs=[model_precision]
-        )
-        codec_device.change(
-            _on_codec_device_change, inputs=[codec_device], outputs=[codec_precision]
-        )
-        t_schedule_mode.change(
-            _on_t_schedule_mode_change, inputs=[t_schedule_mode], outputs=[sway_coeff]
-        )
-
-        load_model_btn.click(
-            _load_model,
-            inputs=[
-                checkpoint,
-                model_device,
-                model_precision,
-                codec_device,
-                codec_precision,
-            ],
-            outputs=[clear_cache_msg],
-        )
-        clear_cache_btn.click(_clear_runtime_cache, outputs=[clear_cache_msg])
-
-        demo.load(
-            fn=_load_model,
-            inputs=[
-                checkpoint,
-                model_device,
-                model_precision,
-                codec_device,
-                codec_precision,
-            ],
-            outputs=[clear_cache_msg],
-        )
-
-    return demo
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Gradio app for Irodori-TTS with cached runtime.")
-    parser.add_argument("--server-name", default="127.0.0.1")
-    parser.add_argument("--server-port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-
-    demo = build_ui()
-    demo.queue(default_concurrency_limit=1)
-    demo.launch(
-        server_name=args.server_name,
-        server_port=args.server_port,
-        share=bool(args.share),
-        debug=bool(args.debug),
-        allowed_paths=["../../outputs"],
-        css=EMOJI_PALETTE_CSS + "\nfooter {display: none !important;}",
-    )
-
+    urls = []
+    for path_str in out_paths:
+        name = __import__("pathlib").Path(path_str).name
+        urls.append(f"http://127.0.0.1:7860/outputs/voice/{name}")
+    
+    return {"urls": urls}
 
 if __name__ == "__main__":
-    main()
+    print("サーバーをポート7860で起動します...")
+    uvicorn.run(app, host="0.0.0.0", port=7860, access_log=False)

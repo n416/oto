@@ -1,4 +1,8 @@
-import gradio as gr
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import uvicorn
 import torchaudio
 import os
 import uuid
@@ -38,31 +42,41 @@ def translate_to_english(text):
     print(f"Translated to: {translated}")
     return translated
 
-with gr.Blocks() as app:
-    gr.Markdown("# 効果音生成API (AudioGen)")
-    with gr.Row():
-        prompt_input = gr.Textbox(label="プロンプト (例: a loud cinematic explosion, boom)")
-        output_audio = gr.Audio(label="生成された音声", type="filepath")
-    
-    generate_btn = gr.Button("生成")
-    generate_btn.click(
-        fn=generate_sfx,
-        inputs=[prompt_input],
-        outputs=[output_audio],
-        api_name="generate"
-    )
-    
-    # フロントエンドから呼び出すための非表示エンドポイント
-    dummy_input = gr.Textbox(visible=False)
-    dummy_output = gr.Textbox(visible=False)
-    dummy_btn = gr.Button(visible=False)
-    dummy_btn.click(
-        fn=translate_to_english,
-        inputs=[prompt_input],
-        outputs=[prompt_input],
-        api_name="translate"
-    )
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+os.makedirs("../../outputs/sfx", exist_ok=True)
+app.mount("/outputs", StaticFiles(directory="../../outputs"), name="outputs")
+
+class SfxRequest(BaseModel):
+    prompt: str
+
+class TranslateRequest(BaseModel):
+    text: str
+
+@app.get("/")
+def api_root():
+    return {"status": "ok"}
+
+@app.post("/generate")
+def api_generate_sfx(req: SfxRequest):
+    filename = generate_sfx(req.prompt)
+    url_path = filename.replace("../../outputs", "/outputs").replace("\\", "/")
+    url = f"http://127.0.0.1:7862{url_path}"
+    return {"url": url}
+
+@app.post("/translate")
+def api_translate(req: TranslateRequest):
+    translated = translate_to_english(req.text)
+    return {"translated": translated}
 
 if __name__ == "__main__":
     print("サーバーをポート7862で起動します...")
-    app.launch(server_name="127.0.0.1", server_port=7862, allowed_paths=["../../outputs"])
+    uvicorn.run(app, host="0.0.0.0", port=7862, access_log=False)

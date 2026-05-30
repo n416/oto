@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Client } from '@gradio/client';
+
 import type { DialogOptions } from '../App';
 import type { SfxData } from '../App';
 import { WaveformTrimmer } from './WaveformTrimmer';
@@ -34,11 +34,15 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
     if (!prompt) return;
     setIsTranslating(true);
     try {
-      const client = await Client.connect("http://127.0.0.1:7862/");
-      const result = await client.predict("/translate", [prompt]);
-      const translated = result.data?.[0] as string;
-      if (translated) {
-        setPrompt(translated);
+      const res = await fetch("http://127.0.0.1:7862/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: prompt })
+      });
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const data = await res.json();
+      if (data.translated) {
+        setPrompt(data.translated);
       }
     } catch (error) {
       console.error(error);
@@ -57,33 +61,30 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
     setIsGenerating(true);
     
     try {
-      const client = await Client.connect("http://127.0.0.1:7862/");
-      
-      // 生成前に自動翻訳を挟む (日本語が含まれている場合や、常に翻訳を通す)
       let finalPrompt = prompt;
       if (/[ぁ-んァ-ヶ亜-熙]/.test(prompt)) {
-        const transResult = await client.predict("/translate", [prompt]);
-        if (transResult.data?.[0]) {
-          finalPrompt = transResult.data[0] as string;
+        const transRes = await fetch("http://127.0.0.1:7862/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: prompt })
+        });
+        if (transRes.ok) {
+          const transData = await transRes.json();
+          if (transData.translated) {
+            finalPrompt = transData.translated;
+          }
         }
       }
 
-      const result = await client.predict("/generate", [finalPrompt]);
+      const res = await fetch("http://127.0.0.1:7862/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: finalPrompt })
+      });
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const resultData = await res.json();
       
-      // @ts-ignore
-      const audioData = result.data?.[0];
-      
-      let audioUrl = "#";
-      const rawValue = (audioData && typeof audioData === "object" && audioData.__type__ === "update") 
-        ? audioData.value 
-        : audioData;
-
-      if (typeof rawValue === "string") {
-        audioUrl = rawValue.startsWith("http") ? rawValue : `http://127.0.0.1:7862/file=${rawValue}`;
-      } else if (rawValue && typeof rawValue === "object") {
-        // @ts-ignore
-        audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7862/file=${rawValue.path}` : "#");
-      }
+      let audioUrl = resultData.url || "#";
 
       try {
         const audioRes = await fetch(audioUrl);

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { generateTake } from '../utils/generateTake';
+import { deleteAudioFiles } from '../utils/deleteAudioFiles';
 import type { CharacterData } from './CharacterSettings';
 import type { LineTakes, TakeData, DialogOptions, SfxData } from '../App';
 import { WaveformTrimmer } from './WaveformTrimmer';
@@ -78,13 +79,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
     } catch (error: any) {
       console.error(error);
-      const port = layer === 'dialogue' ? '7860' : '7862';
-      const serverName = layer === 'dialogue' ? 'ボイスクローニングサーバー' : '効果音生成サーバー';
-      setDialog({
-        type: 'alert',
-        title: '生成エラー',
-        message: `${error.message}\n\nまたは、${serverName}(127.0.0.1:${port})との通信に失敗した可能性があります。上部メニューの「⚙️ システム設定」からサーバーが起動しているか確認してください。`
-      });
+      const errorMessage = error.message || String(error);
+      
+      // バリデーションエラーかどうかを判定
+      const isValidationError = errorMessage.includes("キャラクター") || errorMessage.includes("対応していません");
+      
+      if (isValidationError) {
+        setDialog({
+          type: 'alert',
+          title: '確認',
+          message: errorMessage
+        });
+      } else {
+        const port = layer === 'dialogue' ? '7860' : '7862';
+        const serverName = layer === 'dialogue' ? 'ボイスクローニングサーバー' : '効果音生成サーバー';
+        setDialog({
+          type: 'alert',
+          title: 'サーバー通信エラー',
+          message: `${errorMessage}\n\n${serverName}(127.0.0.1:${port})との通信に失敗した可能性があります。上部メニューの「⚙️ システム設定」からサーバーが起動しているか確認してください。`
+        });
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -112,6 +126,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const handleDeleteTake = (takeId: string) => {
+    const takeToDelete = takes.find(t => t.id === takeId);
+    if (takeToDelete) {
+      deleteAudioFiles([takeToDelete]);
+    }
+    
     setLineTakesMap(prev => {
       const existing = prev[blockId];
       if (!existing) return prev;
@@ -134,6 +153,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const activeTake = takes.find(t => t.id === activeTakeId);
+
+  const updateActiveTakeProps = (propsToUpdate: Partial<TakeData>) => {
+    if (!activeTake) return;
+    setLineTakesMap(prev => {
+      const existing = prev[blockId] || { takes: [], activeTakeId: null };
+      const currentActiveId = existing.activeTakeId || activeTake.id;
+
+      if (currentActiveId.startsWith('take0_original_')) {
+        // オリジナルを編集しようとした場合、瞬時に新しいTakeとしてフォークする
+        const newTake: TakeData = {
+          id: `take_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          audioUrl: activeTake.audioUrl,
+          timestamp: new Date().toLocaleTimeString(),
+          trimOffset: activeTake.trimOffset,
+          trimEnd: activeTake.trimEnd,
+          volume: activeTake.volume,
+          pan: activeTake.pan,
+          ...propsToUpdate
+        };
+        return {
+          ...prev,
+          [blockId]: {
+            takes: [newTake, ...existing.takes],
+            activeTakeId: newTake.id
+          }
+        };
+      } else {
+        // 既存のTakeを更新
+        const newTakes = existing.takes.map(t => 
+          t.id === currentActiveId ? { ...t, ...propsToUpdate } : t
+        );
+        return { ...prev, [blockId]: { ...existing, takes: newTakes } };
+      }
+    });
+  };
 
   return (
     <div style={{
@@ -231,36 +285,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 audioUrl={activeTake.audioUrl}
                 trimOffset={activeTake.trimOffset}
                 trimEnd={activeTake.trimEnd}
-                onChangeOffset={(start, end) => {
-                  setLineTakesMap(prev => {
-                    const existing = prev[blockId] || { takes: [], activeTakeId: null };
-                    // 状態上のアクティブIDが未設定なら、現在のactiveTake.id（Take 0）と見なす
-                    const currentActiveId = existing.activeTakeId || activeTake.id;
-
-                    if (currentActiveId.startsWith('take0_original_')) {
-                      // オリジナルを編集しようとした場合、瞬時に新しいTakeとしてフォークする
-                      const newTake: TakeData = {
-                        id: `take_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                        audioUrl: activeTake.audioUrl,
-                        timestamp: new Date().toLocaleTimeString(),
-                        trimOffset: start,
-                        trimEnd: end
-                      };
-                      return {
-                        ...prev,
-                        [blockId]: {
-                          takes: [newTake, ...existing.takes],
-                          activeTakeId: newTake.id
-                        }
-                      };
-                    } else {
-                      // 既存のTakeを更新
-                      const newTakes = existing.takes.map(t => t.id === currentActiveId ? { ...t, trimOffset: start, trimEnd: end } : t);
-                      return { ...prev, [blockId]: { ...existing, takes: newTakes } };
-                    }
-                  });
-                }}
+                onChangeOffset={(start, end) => updateActiveTakeProps({ trimOffset: start, trimEnd: end })}
               />
+              
+              <div style={{ display: 'flex', gap: '16px', marginTop: '16px' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '8px' }}>
+                    🔊 音量 ({Math.round((activeTake.volume ?? 1) * 100)}%)
+                  </label>
+                  <input 
+                    type="range" 
+                    min="0" max="2" step="0.05" 
+                    value={activeTake.volume ?? 1} 
+                    onChange={(e) => updateActiveTakeProps({ volume: parseFloat(e.target.value) })}
+                    style={{ width: '100%', cursor: 'pointer' }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ display: 'block', fontSize: '11px', color: '#888', marginBottom: '8px' }}>
+                    🎧 パン(左右) ({activeTake.pan ?? 0})
+                  </label>
+                  <input 
+                    type="range" 
+                    min="-1" max="1" step="0.05" 
+                    value={activeTake.pan ?? 0} 
+                    onChange={(e) => updateActiveTakeProps({ pan: parseFloat(e.target.value) })}
+                    style={{ width: '100%', cursor: 'pointer' }}
+                  />
+                </div>
+              </div>
             </div>
           )}
           

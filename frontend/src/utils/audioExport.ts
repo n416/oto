@@ -91,6 +91,8 @@ export async function exportWavFiles(
     url: string;
     manualStart?: number;
     manualEnd?: number;
+    volume?: number;
+    pan?: number;
     timelineStartOffset: number;
     layerName: string;
   }[] = [];
@@ -122,6 +124,8 @@ export async function exportWavFiles(
             url: activeTake.audioUrl,
             manualStart: activeTake.trimOffset,
             manualEnd: activeTake.trimEnd,
+            volume: activeTake.volume,
+            pan: activeTake.pan,
             timelineStartOffset: lineSeconds,
             layerName: layer.id
           });
@@ -141,6 +145,8 @@ export async function exportWavFiles(
               url: sfx.audioUrl,
               manualStart: sfx.trimOffset,
               manualEnd: sfx.trimEnd,
+              volume: sfx.volume,
+              pan: sfx.pan,
               timelineStartOffset: lineSeconds,
               layerName: layer.id
             });
@@ -167,6 +173,8 @@ export async function exportWavFiles(
       startCut: number;
       durationToKeep: number;
       timelineStartOffset: number;
+      volume?: number;
+      pan?: number;
     }[] = [];
 
     let maxDuration = 0;
@@ -200,7 +208,9 @@ export async function exportWavFiles(
           buffer: decodedData,
           startCut,
           durationToKeep,
-          timelineStartOffset: file.timelineStartOffset
+          timelineStartOffset: file.timelineStartOffset,
+          volume: file.volume,
+          pan: file.pan
         });
       } catch (e) {
         console.error(`Failed to decode ${file.filename}`, e);
@@ -218,7 +228,17 @@ export async function exportWavFiles(
     for (const df of decodedFiles) {
       const source = offlineCtx.createBufferSource();
       source.buffer = df.buffer;
-      source.connect(offlineCtx.destination);
+      
+      const panNode = offlineCtx.createStereoPanner();
+      panNode.pan.value = df.pan ?? 0;
+      
+      const gainNode = offlineCtx.createGain();
+      gainNode.gain.value = df.volume ?? 1;
+      
+      source.connect(panNode);
+      panNode.connect(gainNode);
+      gainNode.connect(offlineCtx.destination);
+      
       source.start(df.timelineStartOffset, df.startCut, df.durationToKeep);
     }
 
@@ -259,18 +279,31 @@ export async function exportWavFiles(
 
       let renderedBuffer: AudioBuffer;
 
+      // エクスポート時にボリュームとパンを適用する
+      const applyNodes = (ctx: OfflineAudioContext, source: AudioBufferSourceNode) => {
+        const panNode = ctx.createStereoPanner();
+        panNode.pan.value = file.pan ?? 0;
+        
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = file.volume ?? 1;
+        
+        source.connect(panNode);
+        panNode.connect(gainNode);
+        gainNode.connect(ctx.destination);
+      };
+
       if (mode === 'stem') {
         // 全ファイルを0秒開始のステム形式にするため、(タイムラインの開始位置 + 音声長) のバッファを作成
         const totalDuration = file.timelineStartOffset + durationToKeep;
         const offlineCtx = new OfflineAudioContext(
-          decodedData.numberOfChannels,
+          decodedData.numberOfChannels || 2, // ステレオパン対応のため最低2チャンネル
           Math.ceil(totalDuration * decodedData.sampleRate),
           decodedData.sampleRate
         );
 
         const source = offlineCtx.createBufferSource();
         source.buffer = decodedData;
-        source.connect(offlineCtx.destination);
+        applyNodes(offlineCtx, source);
         // timelineStartOffset から再生開始、元のバッファの startCut の位置から、durationToKeep だけ再生
         source.start(file.timelineStartOffset, startCut, durationToKeep);
         
@@ -278,14 +311,14 @@ export async function exportWavFiles(
       } else {
         // individual cropped files
         const offlineCtx = new OfflineAudioContext(
-          decodedData.numberOfChannels,
+          decodedData.numberOfChannels || 2, // ステレオパン対応のため最低2チャンネル
           Math.ceil(durationToKeep * decodedData.sampleRate),
           decodedData.sampleRate
         );
 
         const source = offlineCtx.createBufferSource();
         source.buffer = decodedData;
-        source.connect(offlineCtx.destination);
+        applyNodes(offlineCtx, source);
         // 0秒目から再生開始、元のバッファの startCut の位置から、durationToKeep だけ再生
         source.start(0, startCut, durationToKeep);
         

@@ -11,6 +11,9 @@ import { PreviewPane } from './components/PreviewPane';
 import { useTimelineAudio } from './hooks/useTimelineAudio';
 import { exportWavFiles, type ExportMode } from './utils/audioExport';
 import { generateTake } from './utils/generateTake';
+import { deleteAudioFiles } from './utils/deleteAudioFiles';
+import { TimelineWaveform } from './components/TimelineWaveform';
+import TimerWorker from './workers/timerWorker?worker';
 
 type LayerType = string;
 
@@ -44,6 +47,8 @@ export interface SfxData {
   timestamp: string;
   trimOffset?: number; // 手動設定オフセット (秒)
   trimEnd?: number; // 終了トリム位置 (秒)
+  volume?: number; // ボリューム (0.0 〜 2.0、デフォルト1.0)
+  pan?: number;    // パン左右バランス (-1.0左 〜 1.0右、デフォルト0.0)
 }
 
 interface ParsedBlock {
@@ -60,6 +65,9 @@ export interface TakeData {
   timestamp: string;
   trimOffset?: number; // 手動設定オフセット (秒)
   trimEnd?: number; // 終了トリム位置 (秒)
+  volume?: number; // ボリューム (0.0 〜 2.0、デフォルト1.0)
+  pan?: number;    // パン左右バランス (-1.0左 〜 1.0右、デフォルト0.0)
+  duration?: number; // オリジナルの音声の長さ (秒)
 }
 
 export interface LineTakes {
@@ -170,6 +178,8 @@ function App() {
     }
     return {};
   });
+
+  const [audioDurations, setAudioDurations] = useState<Record<string, number>>({});
 
   const [cursorPos, setCursorPos] = useState<number | null>(null);
   const [sfxAutocomplete, setSfxAutocomplete] = useState<{ active: boolean, lineIndex: number, colIndex: number } | null>(null);
@@ -363,27 +373,52 @@ function App() {
     20
   );
 
-  // 再生ヘッドのアニメーション
+  // 再生ヘッドのアニメーション（Web Workerを利用してバックグラウンドでも安定発火させる）
   useEffect(() => {
-    let animationFrameId: number;
-    let lastTime: number;
+    const worker = new TimerWorker();
+    let tickCount = 0;
 
-    const animate = (time: number) => {
-      if (lastTime !== undefined) {
-        const delta = time - lastTime;
+    worker.onmessage = (e) => {
+      if (e.data.type === 'tick') {
+        const delta = e.data.delta;
+        tickCount++;
+        if (tickCount % 60 === 0) {
+          console.log(`[TimerWorker] tick received. delta: ${delta}ms. current isPlaying:`, isPlaying);
+        }
         // 1秒間に 60px (1行分) 進む想定
         setPlayheadY(prev => prev + (delta / 1000) * GRID_HEIGHT);
       }
-      lastTime = time;
-      animationFrameId = requestAnimationFrame(animate);
     };
 
     if (isPlaying) {
-      animationFrameId = requestAnimationFrame(animate);
+      worker.postMessage({ command: 'start' });
+    } else {
+      worker.postMessage({ command: 'stop' });
     }
 
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [isPlaying]);
+    return () => {
+      worker.postMessage({ command: 'stop' });
+      worker.terminate();
+    };
+  }, [isPlaying, GRID_HEIGHT]);
+
+  // playheadY の位置に合わせてタイムラインのスクロール位置を自動追従させる
+  useEffect(() => {
+    if (timelineRef.current) {
+      const container = timelineRef.current;
+      const y = playheadY;
+      const margin = 50; // 上下のマージン
+
+      // 画面より下に隠れている場合
+      if (y > container.scrollTop + container.clientHeight - margin) {
+        container.scrollTop = y - container.clientHeight + margin;
+      }
+      // 画面より上に隠れている場合
+      else if (y < container.scrollTop + margin) {
+        container.scrollTop = y - margin;
+      }
+    }
+  }, [playheadY]);
 
   const handlePlayToggle = () => {
     if (!isPlaying && playheadY >= maxLines * GRID_HEIGHT) {
@@ -489,8 +524,16 @@ function App() {
         
         if (isDelete) {
           // 削除される範囲のテイクを消去
+          const takesToDelete: TakeData[] = [];
           for (let i = 0; i < amount; i++) {
-            delete newMap[`${layerId}-${lineIndex + i}`];
+            const id = `${layerId}-${lineIndex + i}`;
+            if (newMap[id]) {
+              takesToDelete.push(...newMap[id].takes);
+              delete newMap[id];
+            }
+          }
+          if (takesToDelete.length > 0) {
+            deleteAudioFiles(takesToDelete);
           }
           // 以降のテイクを上に詰める
           for (let i = lineIndex + amount; i <= maxLine; i++) {
@@ -739,13 +782,29 @@ function App() {
 
         if (addedCount === 0) {
           // 純粋な削除（1行以上消した）
+          const takesToDelete: TakeData[] = [];
           for (let i = 0; i < removedCount; i++) {
-            delete newMap[`${layerId}-${changeIndex + i}`];
+            const id = `${layerId}-${changeIndex + i}`;
+            if (newMap[id]) {
+              takesToDelete.push(...newMap[id].takes);
+              delete newMap[id];
+            }
+          }
+          if (takesToDelete.length > 0) {
+            deleteAudioFiles(takesToDelete);
           }
         } else if (removedCount > 0) {
           // 置換・分割（changeIndex は維持、その後ろの消された分を削除）
+          const takesToDelete: TakeData[] = [];
           for (let i = 1; i < removedCount; i++) {
-            delete newMap[`${layerId}-${changeIndex + i}`];
+            const id = `${layerId}-${changeIndex + i}`;
+            if (newMap[id]) {
+              takesToDelete.push(...newMap[id].takes);
+              delete newMap[id];
+            }
+          }
+          if (takesToDelete.length > 0) {
+            deleteAudioFiles(takesToDelete);
           }
         }
 
@@ -814,6 +873,7 @@ function App() {
       setCursorPos(cursor);
     }
     updateScriptAndSync(activeTab, updatedText);
+    updatePlayheadFromCursor(e.target);
   };
 
   useEffect(() => {
@@ -822,6 +882,37 @@ function App() {
       setCursorPos(null);
     }
   }, [scripts, cursorPos]);
+
+  const updatePlayheadFromCursor = (target: HTMLTextAreaElement) => {
+    if (isPlaying) return; // 再生中は自動移動を優先
+    
+    const cursor = target.selectionStart;
+    const text = target.value;
+    
+    const textBeforeCursor = text.substring(0, cursor);
+    const lines = textBeforeCursor.split('\n');
+    const lineIndex = lines.length - 1;
+    const colIndex = lines[lines.length - 1].length;
+    
+    const allLines = text.split('\n');
+    const currentLineText = allLines[lineIndex] || '';
+    
+    // 行内でのカーソル位置の割合 (0.0 〜 1.0)
+    const ratio = currentLineText.length > 0 ? colIndex / currentLineText.length : 0;
+    
+    // この行の音声ブロックの長さを取得
+    const blockId = `${activeTab}-${lineIndex}`;
+    const takesData = lineTakesMap[blockId];
+    
+    let blockDurationLines = 1; 
+    if (takesData && takesData.activeTakeId && audioDurations[takesData.activeTakeId]) {
+      const duration = audioDurations[takesData.activeTakeId];
+      blockDurationLines = Math.max(1, Math.ceil(duration));
+    }
+    
+    const y = (lineIndex + (ratio * blockDurationLines)) * GRID_HEIGHT;
+    setPlayheadY(y);
+  };
 
   const handleScroll = () => {
     if (editorRef.current && gutterRef.current) {
@@ -872,29 +963,123 @@ function App() {
 
     setBatchProgress({ current: 0, total: blocksToGenerate.length });
     let successCount = 0;
+    
+    // 各元の行ごとに、どれだけパディング（空行）を挿入したかを記録するマップ
+    const paddingByOriginalLine: Record<number, number> = {};
 
     for (let i = 0; i < blocksToGenerate.length; i++) {
       const block = blocksToGenerate[i];
       setBatchProgress({ current: i + 1, total: blocksToGenerate.length });
       
+      // 現在の実際の行インデックスを計算
+      // 自分の元の行より「前」の行に挿入されたパディングの合計を足す
+      let currentLineIndex = block.lineIndex;
+      for (const [origLineStr, pad] of Object.entries(paddingByOriginalLine)) {
+        const origLine = parseInt(origLineStr, 10);
+        if (origLine < block.lineIndex) {
+          currentLineIndex += pad;
+        }
+      }
+      
+      console.log(`\n[Batch] === 処理開始: ${i + 1}個目 / 全${blocksToGenerate.length}個 ===`);
+      console.log(`[Batch] 対象テキスト: "${block.text}"`);
+      console.log(`[Batch] 元の行番号(origLine): ${block.lineIndex + 1}行目 -> 現在の移動先行番号(currentLine): ${currentLineIndex + 1}行目`);
+
+      const currentBlockId = `${block.layer}-${currentLineIndex}`;
+      
       try {
         const fullScript = scripts[block.layer] || '';
         const newTake = await generateTake(block.layer, block.text, characters, fullScript, block.lineIndex);
         
+        console.log(`[Batch] 音声生成完了: ${newTake.audioUrl}`);
+
+        // 音声の長さを直接取得（生成時に算出されている）
+        const duration = newTake.duration || 1;
+        const durationLines = Math.max(1, Math.ceil(duration));
+        const requiredPadding = durationLines - 1;
+        
+        console.log(`[Batch] -> 音声の長さ: ${duration.toFixed(2)}秒 (計算上の行数: ${durationLines}行, 必要なパディング: ${requiredPadding}行)`);
+
+        // テイクの保存
         setLineTakesMap(prev => {
-          const existing = prev[block.id] || { takes: [], activeTakeId: null };
+          const existing = prev[currentBlockId] || { takes: [], activeTakeId: null };
           return {
             ...prev,
-            [block.id]: {
+            [currentBlockId]: {
               takes: [newTake, ...existing.takes],
               activeTakeId: newTake.id
             }
           };
         });
+        
+        // 音声の長さを記録（UI表示用）
+        setAudioDurations(prev => ({
+          ...prev,
+          [newTake.id]: duration
+        }));
+
+        // パディングの差分計算（同じ行に複数ブロックがある場合の最大値を考慮）
+        const alreadyPadded = paddingByOriginalLine[block.lineIndex] || 0;
+        let newPaddingToAdd = 0;
+        
+        if (requiredPadding > alreadyPadded) {
+          newPaddingToAdd = requiredPadding - alreadyPadded;
+          paddingByOriginalLine[block.lineIndex] = requiredPadding;
+        }
+
+        // 次のテキストが被らないように空行を挿入する
+        if (newPaddingToAdd > 0) {
+          // 挿入位置: 現在の行の直下 + すでにこの行グループに挿入したパディングの後ろ
+          const insertPos = currentLineIndex + 1 + alreadyPadded;
+          
+          console.log(`[Batch] -> 追加パディング: ${newPaddingToAdd}行 を L${insertPos + 1} の位置に挿入します。(既に ${alreadyPadded}行 挿入済み)`);
+
+          // テキストに空行を挿入
+          setScripts(prevScripts => {
+            const nextScripts = { ...prevScripts };
+            layers.forEach(layer => {
+              const lines = (nextScripts[layer.id] || '').split('\n');
+              const padding = Array(newPaddingToAdd).fill('');
+              lines.splice(insertPos, 0, ...padding);
+              nextScripts[layer.id] = lines.join('\n');
+            });
+            return nextScripts;
+          });
+          
+          // lineTakesMap のシフト（下から順にずらす）
+          setLineTakesMap(prev => {
+            const newMap = { ...prev };
+            layers.forEach(layer => {
+              const layerId = layer.id;
+              const keys = Object.keys(newMap).filter(k => k.startsWith(`${layerId}-`));
+              const indices = keys.map(k => parseInt(k.split('-')[1], 10)).sort((a, b) => b - a);
+              
+              for (const idx of indices) {
+                if (idx >= insertPos) {
+                  const oldId = `${layerId}-${idx}`;
+                  const newId = `${layerId}-${idx + newPaddingToAdd}`;
+                  newMap[newId] = newMap[oldId];
+                  delete newMap[oldId];
+                }
+              }
+            });
+            return newMap;
+          });
+          
+          // カット(区切り線)のシフト
+          setCuts(prevCuts => {
+            const targetY = insertPos * GRID_HEIGHT;
+            const shiftY = newPaddingToAdd * GRID_HEIGHT;
+            return prevCuts.map(cutY => (cutY >= targetY ? cutY + shiftY : cutY));
+          });
+        } else {
+          console.log(`[Batch] -> 追加の空行挿入は不要です。(既に ${alreadyPadded}行 挿入済み)`);
+        }
+
         successCount++;
       } catch (error: any) {
         console.error(error);
-        if (!window.confirm(`ブロック(L${block.lineIndex + 1}: ${block.text})の生成に失敗しました。継続しますか？\n\nエラー詳細: ${error.message}`)) {
+        if (!window.confirm(`ブロック(L${currentLineIndex + 1}: ${block.text})の生成に失敗しました。継続しますか？\n\nエラー詳細: ${error.message}`)) {
           break;
         }
       }
@@ -1030,6 +1215,12 @@ function App() {
                 ref={editorRef}
                 value={scripts[activeTab] || ''}
                 onChange={handleScriptChange}
+                onClick={(e) => updatePlayheadFromCursor(e.currentTarget)}
+                onKeyUp={(e) => {
+                  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
+                    updatePlayheadFromCursor(e.currentTarget);
+                  }
+                }}
                 onCompositionStart={handleCompositionStart}
                 onCompositionEnd={handleCompositionEnd}
                 onScroll={handleScroll}
@@ -1158,7 +1349,39 @@ function App() {
               }} />
             </div>
 
-            <div data-timeline-bg="true" style={{ marginLeft: '50px', position: 'relative', height: '100%' }}>
+            <div 
+              data-timeline-bg="true" 
+              style={{ marginLeft: '50px', position: 'relative', height: '100%' }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                const rect = e.currentTarget.getBoundingClientRect();
+                const y = e.clientY - rect.top;
+                const rowIndex = Math.floor(y / GRID_HEIGHT);
+                if (rowIndex >= 0 && rowIndex < maxLines) {
+                  if (dragOverIndex !== rowIndex) setDragOverIndex(rowIndex);
+                }
+              }}
+              onDragLeave={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                if (e.clientX < rect.left || e.clientX >= rect.right || e.clientY < rect.top || e.clientY >= rect.bottom) {
+                  setDragOverIndex(null);
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOverIndex(null);
+                const data = e.dataTransfer.getData('text/plain');
+                if (data) {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const y = e.clientY - rect.top;
+                  const rowIndex = Math.floor(y / GRID_HEIGHT);
+                  if (rowIndex >= 0 && rowIndex < maxLines) {
+                    const [dragLayer, dragIndexStr] = data.split(':');
+                    moveBlock(dragLayer as LayerType, parseInt(dragIndexStr, 10), rowIndex);
+                  }
+                }
+              }}
+            >
               {[...Array(maxLines)].map((_, i) => (
                 <div 
                   key={i} 
@@ -1168,24 +1391,9 @@ function App() {
                     borderBottom: '1px dashed #222', 
                     boxSizing: 'border-box',
                     backgroundColor: dragOverIndex === i ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
-                    transition: 'background-color 0.1s'
+                    transition: 'background-color 0.1s',
+                    pointerEvents: 'none'
                   }} 
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    if (dragOverIndex !== i) setDragOverIndex(i);
-                  }}
-                  onDragLeave={() => {
-                    if (dragOverIndex === i) setDragOverIndex(null);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setDragOverIndex(null);
-                    const data = e.dataTransfer.getData('text/plain');
-                    if (data) {
-                      const [dragLayer, dragIndexStr] = data.split(':');
-                      moveBlock(dragLayer as LayerType, parseInt(dragIndexStr, 10), i);
-                    }
-                  }}
                 />
               ))}
               
@@ -1276,9 +1484,65 @@ function App() {
                 const leftPercentage = layerIndex * widthPercentage;
 
                 const takesData = lineTakesMap[block.id];
-                const hasActiveTake = takesData && takesData.activeTakeId;
-                const isSfxOriginal = block.layer === 'sfx' && /^SFX(\d{3}):/.test(block.text);
+                let hasActiveTake = false;
+                let activeTakeUrl = "";
+                let activeTakeId = "";
+                
+                if (takesData && takesData.activeTakeId) {
+                  const activeTake = takesData.takes.find(t => t.id === takesData.activeTakeId);
+                  if (activeTake && activeTake.audioUrl) {
+                    hasActiveTake = true;
+                    activeTakeUrl = activeTake.audioUrl;
+                    activeTakeId = activeTake.id;
+                  }
+                }
+                
+                let isSfxOriginal = false;
+                if (block.layer === 'sfx' && !hasActiveTake) {
+                  const sfxMatch = block.text.match(/^SFX(\d{3}):/);
+                  if (sfxMatch) {
+                    const sfx = sfxs.find(s => s.id === `SFX${sfxMatch[1]}`);
+                    if (sfx && sfx.audioUrl) {
+                      isSfxOriginal = true;
+                      activeTakeUrl = sfx.audioUrl;
+                      activeTakeId = sfx.id;
+                    }
+                  }
+                }
+
                 const hasTake = hasActiveTake || isSfxOriginal || block.layer === 'bgm';
+
+                // ブロックの高さを音声の長さに合わせて計算 (トリミングを考慮)
+                let blockDuration = 1;
+                let activeTrimOffset = 0;
+                let activeTrimEnd: number | undefined = undefined;
+
+                if (activeTakeId && audioDurations[activeTakeId]) {
+                  const totalDur = audioDurations[activeTakeId];
+                  activeTrimEnd = totalDur;
+
+                  if (hasActiveTake) {
+                    const activeTake = takesData.takes.find(t => t.id === activeTakeId);
+                    if (activeTake) {
+                      activeTrimOffset = activeTake.trimOffset ?? 0;
+                      activeTrimEnd = activeTake.trimEnd ?? totalDur;
+                    }
+                  } else if (isSfxOriginal) {
+                    const sfxMatch = block.text.match(/^SFX(\d{3}):/);
+                    if (sfxMatch) {
+                      const sfx = sfxs.find(s => s.id === `SFX${sfxMatch[1]}`);
+                      if (sfx) {
+                        activeTrimOffset = sfx.trimOffset ?? 0;
+                        activeTrimEnd = sfx.trimEnd ?? totalDur;
+                      }
+                    }
+                  }
+                  
+                  const activeDur = Math.max(0.1, activeTrimEnd - activeTrimOffset);
+                  blockDuration = Math.max(1, Math.ceil(activeDur));
+                }
+
+                const blockHeight = (blockDuration * GRID_HEIGHT) - 8;
 
                 return (
                   <div 
@@ -1287,6 +1551,9 @@ function App() {
                     onDragStart={(e) => {
                       e.dataTransfer.setData('text/plain', `${block.layer}:${block.lineIndex}`);
                     }}
+                    onDragEnd={() => {
+                      setDragOverIndex(null);
+                    }}
                     onClick={() => {
                       setActiveTab(block.layer);
                       setSelectedLine(block.lineIndex + 1);
@@ -1294,7 +1561,7 @@ function App() {
                     style={{ 
                       position: 'absolute', 
                       top: `${block.lineIndex * GRID_HEIGHT + 4}px`, 
-                      height: `${GRID_HEIGHT - 8}px`, 
+                      height: `${blockHeight}px`, 
                       left: `${leftPercentage}%`, 
                       width: `${widthPercentage - 1}%`, // slightly smaller to leave gap
                       backgroundColor: hasTake ? block.color + '25' : 'transparent',
@@ -1303,21 +1570,46 @@ function App() {
                       borderRight: hasTake ? 'none' : `1px dashed ${block.color}50`,
                       borderBottom: hasTake ? 'none' : `1px dashed ${block.color}50`,
                       borderLeft: `3px solid ${block.color}`, 
-                      padding: '4px 8px', 
                       borderRadius: '2px', 
-                      fontSize: '12px', 
                       overflow: 'hidden', 
-                      whiteSpace: 'nowrap', 
-                      textOverflow: 'ellipsis', 
                       cursor: 'grab', 
                       boxShadow: '0 2px 5px rgba(0,0,0,0.2)', 
-                      userSelect: 'none' 
+                      userSelect: 'none',
+                      zIndex: blockDuration > 1 ? 5 : 10 // 長いブロック（BGM等）は下敷きにする
                     }}
                     onMouseEnter={(e) => e.currentTarget.style.filter = 'brightness(1.5)'}
                     onMouseLeave={(e) => e.currentTarget.style.filter = 'none'}
                   >
-                    {!hasTake && <span style={{ marginRight: '4px', fontSize: '10px' }} title="テイクが生成されていません">⚠️</span>}
-                    {block.text}
+                    {activeTakeUrl && (
+                      <TimelineWaveform 
+                        audioUrl={activeTakeUrl} 
+                        color={block.color}
+                        trimOffset={activeTrimOffset}
+                        trimEnd={activeTrimEnd}
+                        onDurationLoaded={(duration) => {
+                          setAudioDurations(prev => {
+                            if (prev[activeTakeId] === duration) return prev;
+                            return { ...prev, [activeTakeId]: duration };
+                          });
+                        }}
+                      />
+                    )}
+                    <div style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      padding: '4px 8px',
+                      fontSize: '12px',
+                      whiteSpace: 'nowrap',
+                      textOverflow: 'ellipsis',
+                      overflow: 'hidden',
+                      width: '100%',
+                      zIndex: 10,
+                      pointerEvents: 'none'
+                    }}>
+                      {!hasTake && <span style={{ marginRight: '4px', fontSize: '10px' }} title="テイクが生成されていません">⚠️</span>}
+                      {block.text}
+                    </div>
                   </div>
                 );
               })}
@@ -1377,9 +1669,17 @@ function App() {
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button 
             onClick={handleBatchGenerate}
-            style={{ padding: '4px 12px', fontSize: '12px', backgroundColor: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+            disabled={batchProgress !== null}
+            style={{ 
+              padding: '4px 12px', fontSize: '12px', 
+              backgroundColor: batchProgress !== null ? '#555' : '#9b59b6', 
+              color: batchProgress !== null ? '#aaa' : 'white', 
+              border: 'none', borderRadius: '4px', 
+              cursor: batchProgress !== null ? 'not-allowed' : 'pointer', 
+              fontWeight: 'bold' 
+            }}
           >
-            🎲 未生成を一括生成
+            {batchProgress !== null ? '⏳ 生成中...' : '🎲 未生成を一括生成'}
           </button>
           
           <button 
@@ -1453,10 +1753,24 @@ function App() {
       )}
 
       {batchProgress && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ backgroundColor: '#2d3748', padding: '24px 32px', borderRadius: '8px', textAlign: 'center', border: '1px solid #4a5568' }}>
-            <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff', marginBottom: '16px' }}>テイク一括生成中... ({batchProgress.current} / {batchProgress.total})</div>
-            <div style={{ color: '#63b3ed', fontFamily: 'monospace', whiteSpace: 'pre-wrap', minHeight: '40px' }}>しばらくお待ちください...</div>
+        <div style={{ 
+          position: 'fixed', 
+          bottom: '24px', 
+          right: '24px', 
+          zIndex: 9999, 
+          backgroundColor: '#2d3748', 
+          padding: '16px 24px', 
+          borderRadius: '8px', 
+          boxShadow: '0 4px 12px rgba(0,0,0,0.5)', 
+          border: '1px solid #4a5568',
+          pointerEvents: 'none'
+        }}>
+          <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#fff', marginBottom: '8px' }}>
+            🔄 テイク一括生成中... ({batchProgress.current} / {batchProgress.total})
+          </div>
+          <div style={{ color: '#63b3ed', fontSize: '12px' }}>
+            バックグラウンドで処理中です。<br/>
+            他の操作（編集や再生）を続けることができます。
           </div>
         </div>
       )}

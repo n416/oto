@@ -85,6 +85,26 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
         audioUrl = rawValue.url || (rawValue.path ? `http://127.0.0.1:7862/file=${rawValue.path}` : "#");
       }
 
+      try {
+        const audioRes = await fetch(audioUrl);
+        const arrayBuffer = await audioRes.arrayBuffer();
+        const base64 = btoa(
+          new Uint8Array(arrayBuffer)
+            .reduce((data, byte) => data + String.fromCharCode(byte), '')
+        );
+        const uploadRes = await fetch('/api/backend/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: `sfx_${Date.now()}.wav`, base64 })
+        });
+        if (uploadRes.ok) {
+          const data = await uploadRes.json();
+          audioUrl = data.url; // 永続化されたURLに差し替え
+        }
+      } catch (e) {
+        console.warn("生成された音声の永続化に失敗しました。GradioのURLをフォールバックとして使用します。", e);
+      }
+
       const newId = getNextAvailableId();
       const newSfx: SfxData = {
         id: newId,

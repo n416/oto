@@ -139,6 +139,40 @@ export function backendManagerPlugin(): Plugin {
           return;
         }
 
+        if (req.method === 'POST' && req.url === '/api/backend/delete') {
+          let body = '';
+          req.on('data', chunk => body += chunk);
+          req.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              if (!data.url || !data.url.startsWith('/uploads/')) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'Invalid URL' }));
+                return;
+              }
+              const filePath = path.join(path.resolve(__dirname, 'public'), data.url);
+              const uploadsDir = path.resolve(__dirname, 'public/uploads');
+              
+              // パストラバーサル対策: ファイルが uploads ディレクトリ内にあるかチェック
+              if (!filePath.startsWith(uploadsDir)) {
+                res.statusCode = 403;
+                res.end(JSON.stringify({ error: 'Forbidden' }));
+                return;
+              }
+              
+              if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+              }
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: true }));
+            } catch (err: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: err.toString() }));
+            }
+          });
+          return;
+        }
+
         if (req.method === 'POST') {
           let body = '';
           req.on('data', chunk => body += chunk);

@@ -130,9 +130,43 @@ export async function generateTake(
     throw new Error('現在、このレイヤーでの生成には対応していません。');
   }
 
+  let duration: number | undefined;
+
+  // GradioのテンポラリURLはバックエンド再起動で消えるため、生成直後に永続化(アップロード)する
+  try {
+    const audioRes = await fetch(audioUrl);
+    const arrayBuffer = await audioRes.arrayBuffer();
+    
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const decodedData = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+      duration = decodedData.duration;
+    } catch (e) {
+      console.warn("Failed to decode audio duration in generateTake", e);
+    }
+
+    // ArrayBuffer to Base64 (巨大ファイルには適さないが、音声なら問題ない範囲)
+    const base64 = btoa(
+      new Uint8Array(arrayBuffer)
+        .reduce((data, byte) => data + String.fromCharCode(byte), '')
+    );
+    const uploadRes = await fetch('/api/backend/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: `take_${Date.now()}.wav`, base64 })
+    });
+    if (uploadRes.ok) {
+      const data = await uploadRes.json();
+      audioUrl = data.url; // 永続化されたURLに差し替え
+    }
+  } catch (e) {
+    console.warn("生成された音声の永続化に失敗しました。GradioのURLをフォールバックとして使用します。", e);
+  }
+
   return {
     id: `take_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     audioUrl: audioUrl,
-    timestamp: new Date().toLocaleTimeString()
+    timestamp: new Date().toLocaleTimeString(),
+    duration: duration
   };
 }

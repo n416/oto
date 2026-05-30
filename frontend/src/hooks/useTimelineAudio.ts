@@ -27,7 +27,7 @@ export const useTimelineAudio = (
       lines.forEach((lineText, lineIndex) => {
         if (!lineText.trim()) return;
 
-        const items: { url: string; manualOffset?: number; manualEnd?: number }[] = [];
+        const items: { url: string; manualOffset?: number; manualEnd?: number; volume?: number; pan?: number; }[] = [];
 
         // ボイス（テイク）の検索
         const blockId = `${layer.id}-${lineIndex}`;
@@ -36,7 +36,13 @@ export const useTimelineAudio = (
         if (takesData && takesData.activeTakeId) {
           const activeTake = takesData.takes.find(t => t.id === takesData.activeTakeId);
           if (activeTake && activeTake.audioUrl) {
-            items.push({ url: activeTake.audioUrl, manualOffset: activeTake.trimOffset, manualEnd: activeTake.trimEnd });
+            items.push({ 
+              url: activeTake.audioUrl, 
+              manualOffset: activeTake.trimOffset, 
+              manualEnd: activeTake.trimEnd,
+              volume: activeTake.volume,
+              pan: activeTake.pan
+            });
             hasActiveTake = true;
           }
         }
@@ -49,7 +55,13 @@ export const useTimelineAudio = (
             const sfxId = `SFX${match[1]}`;
             const sfx = sfxs.find(s => s.id === sfxId);
             if (sfx && sfx.audioUrl) {
-              items.push({ url: sfx.audioUrl, manualOffset: sfx.trimOffset, manualEnd: sfx.trimEnd });
+              items.push({ 
+                url: sfx.audioUrl, 
+                manualOffset: sfx.trimOffset, 
+                manualEnd: sfx.trimEnd,
+                volume: sfx.volume,
+                pan: sfx.pan
+              });
             }
           }
         }
@@ -71,7 +83,11 @@ export const useTimelineAudio = (
       const url = item.url;
       if (!trimCache.has(url)) {
         try {
-          const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+          if (!(window as any).decodeCtx) {
+            (window as any).decodeCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          }
+          const audioContext = (window as any).decodeCtx as AudioContext;
+          
           const response = await fetch(url);
           const arrayBuffer = await response.arrayBuffer();
           const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -114,42 +130,78 @@ export const useTimelineAudio = (
   }, []);
 
   // 行の音声を再生するヘルパー
-  const playLine = useCallback((lineIndex: number) => {
+  const playLine = useCallback((lineIndex: number, seekOffset: number = 0) => {
     const items = queueRef.current[lineIndex];
     if (items && items.length > 0) {
+      console.log(`[playLine] lineIndex: ${lineIndex}, seekOffset: ${seekOffset}, itemsCount: ${items.length}`);
+      if (!(window as any).audioCtx) {
+        (window as any).audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const ctx = (window as any).audioCtx as AudioContext;
+      if (ctx.state === 'suspended') ctx.resume();
+
       items.forEach(item => {
-        const { url, manualOffset, manualEnd } = item;
+        const { url, manualOffset, manualEnd, volume, pan } = item;
+        console.log(`[playLine] Loading audio: ${url}`);
         const audio = new Audio(url);
+        audio.crossOrigin = "anonymous";
         activeAudioRef.current.push(audio);
         
+        let sourceNode: MediaElementAudioSourceNode | null = null;
+        try {
+          sourceNode = ctx.createMediaElementSource(audio);
+          const panNode = ctx.createStereoPanner();
+          panNode.pan.value = pan ?? 0;
+          
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = volume ?? 1;
+          
+          sourceNode.connect(panNode);
+          panNode.connect(gainNode);
+          gainNode.connect(ctx.destination);
+        } catch (e) {
+          console.warn("Web Audio API routing failed, fallback to basic volume:", e);
+          audio.volume = Math.min(Math.max(volume ?? 1, 0), 1);
+        }
+        
         // 手動オフセットが設定されていれば優先、なければ自動解析のキャッシュを使用
-        const offset = manualOffset !== undefined ? manualOffset : (trimCache.get(url) || 0);
+        const baseOffset = manualOffset !== undefined ? manualOffset : (trimCache.get(url) || 0);
+        const finalOffset = baseOffset + seekOffset;
         
         // メタデータがロードされたらオフセットを設定して再生
         audio.addEventListener('loadedmetadata', () => {
           // ロード中にstopAllが呼ばれていた場合は再生しない
-          if (!activeAudioRef.current.includes(audio)) return;
+          if (!activeAudioRef.current.includes(audio)) {
+            if (sourceNode) sourceNode.disconnect();
+            return;
+          }
           
-          if (offset > 0) {
-            audio.currentTime = offset;
+          if (finalOffset > 0) {
+            if (finalOffset >= audio.duration) {
+              // 既に再生終了している長さの場合はスキップ
+              activeAudioRef.current = activeAudioRef.current.filter(a => a !== audio);
+              if (sourceNode) sourceNode.disconnect();
+              return;
+            }
+            audio.currentTime = finalOffset;
           }
           
           if (manualEnd !== undefined) {
             audio.ontimeupdate = () => {
               if (audio.currentTime >= manualEnd) {
                 audio.pause();
-                audio.ontimeupdate = null;
-                activeAudioRef.current = activeAudioRef.current.filter(a => a !== audio);
+                if (sourceNode) sourceNode.disconnect();
               }
             };
           }
-
-          audio.play().catch(e => console.warn('Audio play blocked:', e));
-        }, { once: true });
+          
+          audio.play().catch(e => console.error("Playback failed:", e));
+        });
         
-        audio.onended = () => {
+        audio.addEventListener('ended', () => {
+          if (sourceNode) sourceNode.disconnect();
           activeAudioRef.current = activeAudioRef.current.filter(a => a !== audio);
-        };
+        });
         
         // ロードを開始
         audio.load();
@@ -160,10 +212,17 @@ export const useTimelineAudio = (
   // 毎フレーム呼ばれる tick
   const tick = useCallback((currentTimeSeconds: number) => {
     if (prevTimeRef.current === null) {
-      // 再生開始直後のフレーム
-      // もし再生開始位置が「ちょうど整数秒（例: 0秒ジャスト）」ならその行を鳴らす
-      if (currentTimeSeconds === Math.floor(currentTimeSeconds)) {
-        playLine(Math.floor(currentTimeSeconds));
+      // 再生開始直後 または シーク後
+      const currentLine = Math.floor(currentTimeSeconds);
+      const subSecondSeek = currentTimeSeconds - currentLine;
+
+      // 過去30秒 (30行) 分遡って、現在再生中のはずのオーディオを探す（数百行遡るとAudioContextがクラッシュするため）
+      const maxLookBack = 30;
+      const startIdx = Math.max(0, currentLine - maxLookBack);
+      
+      for (let i = startIdx; i <= currentLine; i++) {
+        const timePassed = currentLine - i + subSecondSeek;
+        playLine(i, timePassed);
       }
     } else {
       const startIdx = Math.floor(prevTimeRef.current);
@@ -172,7 +231,7 @@ export const useTimelineAudio = (
       // 行をまたいだ場合
       if (startIdx < endIdx) {
         for (let i = startIdx + 1; i <= endIdx; i++) {
-          playLine(i);
+          playLine(i, 0);
         }
       }
     }

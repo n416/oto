@@ -7,7 +7,8 @@ export async function generateTake(
   text: string,
   characters: CharacterData[],
   fullScript?: string,
-  lineIndex?: number
+  lineIndex?: number,
+  signal?: AbortSignal
 ): Promise<TakeData> {
   let audioUrl = "#";
 
@@ -44,7 +45,7 @@ export async function generateTake(
     }
 
     // 既存のURL/Blobからファイルデータを取得
-    const response = await fetch(character.refAudioPath);
+    const response = await fetch(character.refAudioPath, { signal });
     const blob = await response.blob();
 
     const formData = new FormData();
@@ -53,7 +54,8 @@ export async function generateTake(
 
     const res = await fetch("http://127.0.0.1:7860/generate", {
       method: "POST",
-      body: formData
+      body: formData,
+      signal
     });
     
     if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
@@ -74,7 +76,8 @@ export async function generateTake(
       const transRes = await fetch("http://127.0.0.1:7862/translate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: promptText })
+        body: JSON.stringify({ text: promptText }),
+        signal
       });
       if (transRes.ok) {
         const transData = await transRes.json();
@@ -87,7 +90,8 @@ export async function generateTake(
     const res = await fetch("http://127.0.0.1:7862/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: finalPrompt })
+      body: JSON.stringify({ prompt: finalPrompt }),
+      signal
     });
     
     if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
@@ -101,7 +105,7 @@ export async function generateTake(
 
   // GradioのテンポラリURLはバックエンド再起動で消えるため、生成直後に永続化(アップロード)する
   try {
-    const audioRes = await fetch(audioUrl);
+    const audioRes = await fetch(audioUrl, { signal });
     const arrayBuffer = await audioRes.arrayBuffer();
     
     try {
@@ -120,7 +124,8 @@ export async function generateTake(
     const uploadRes = await fetch('/api/backend/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: `take_${Date.now()}.wav`, base64 })
+      body: JSON.stringify({ filename: `take_${Date.now()}.wav`, base64 }),
+      signal
     });
     if (uploadRes.ok) {
       const data = await uploadRes.json();

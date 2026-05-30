@@ -165,7 +165,9 @@ function App() {
   const [isBackendMenuOpen, setIsBackendMenuOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
-  const [batchProgress, setBatchProgress] = useState<{ current: number, total: number } | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ current: number, total: number, status: 'running' | 'paused' } | null>(null);
+  const batchStateRef = useRef<'running' | 'paused' | 'stopped'>('stopped');
+  const batchAbortControllerRef = useRef<AbortController | null>(null);
   
   // --- カスタムダイアログ用ステート ---
   const [dialog, setDialog] = useState<DialogOptions | null>(null);
@@ -961,15 +963,24 @@ function App() {
       return;
     }
 
-    setBatchProgress({ current: 0, total: blocksToGenerate.length });
+    batchStateRef.current = 'running';
+    setBatchProgress({ current: 0, total: blocksToGenerate.length, status: 'running' });
     let successCount = 0;
     
     // 各元の行ごとに、どれだけパディング（空行）を挿入したかを記録するマップ
     const paddingByOriginalLine: Record<number, number> = {};
 
     for (let i = 0; i < blocksToGenerate.length; i++) {
+      if (batchStateRef.current === 'stopped') break;
+
+      while (batchStateRef.current === 'paused') {
+        await new Promise(r => setTimeout(r, 200));
+        if (batchStateRef.current === 'stopped') break;
+      }
+      if (batchStateRef.current === 'stopped') break;
+
       const block = blocksToGenerate[i];
-      setBatchProgress({ current: i + 1, total: blocksToGenerate.length });
+      setBatchProgress({ current: i + 1, total: blocksToGenerate.length, status: batchStateRef.current as 'running' | 'paused' });
       
       // 現在の実際の行インデックスを計算
       // 自分の元の行より「前」の行に挿入されたパディングの合計を足す
@@ -989,7 +1000,9 @@ function App() {
       
       try {
         const fullScript = scripts[block.layer] || '';
-        const newTake = await generateTake(block.layer, block.text, characters, fullScript, block.lineIndex);
+        const controller = new AbortController();
+        batchAbortControllerRef.current = controller;
+        const newTake = await generateTake(block.layer, block.text, characters, fullScript, block.lineIndex, controller.signal);
         
         console.log(`[Batch] 音声生成完了: ${newTake.audioUrl}`);
 
@@ -1078,6 +1091,10 @@ function App() {
 
         successCount++;
       } catch (error: any) {
+        if (error.name === 'AbortError') {
+          console.log("[Batch] 生成がキャンセルされました。");
+          break;
+        }
         console.error(error);
         if (!window.confirm(`ブロック(L${currentLineIndex + 1}: ${block.text})の生成に失敗しました。継続しますか？\n\nエラー詳細: ${error.message}`)) {
           break;
@@ -1763,14 +1780,49 @@ function App() {
           borderRadius: '8px', 
           boxShadow: '0 4px 12px rgba(0,0,0,0.5)', 
           border: '1px solid #4a5568',
-          pointerEvents: 'none'
         }}>
           <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#fff', marginBottom: '8px' }}>
             🔄 テイク一括生成中... ({batchProgress.current} / {batchProgress.total})
           </div>
-          <div style={{ color: '#63b3ed', fontSize: '12px' }}>
+          <div style={{ color: '#63b3ed', fontSize: '12px', marginBottom: '12px' }}>
             バックグラウンドで処理中です。<br/>
             他の操作（編集や再生）を続けることができます。
+          </div>
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+            {batchProgress.status === 'running' ? (
+              <button
+                onClick={() => {
+                  batchStateRef.current = 'paused';
+                  setBatchProgress(prev => prev ? { ...prev, status: 'paused' } : null);
+                }}
+                style={{ padding: '6px 12px', fontSize: '12px', backgroundColor: '#e2a74a', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                ⏸ 一時停止
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  batchStateRef.current = 'running';
+                  setBatchProgress(prev => prev ? { ...prev, status: 'running' } : null);
+                }}
+                style={{ padding: '6px 12px', fontSize: '12px', backgroundColor: '#2ecc71', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                ▶ 再開
+              </button>
+            )}
+            <button
+              onClick={() => {
+                if (window.confirm('一括生成を停止しますか？\n※現在実行中の生成処理がキャンセルされ、未生成の行はスキップされます。')) {
+                  batchStateRef.current = 'stopped';
+                  if (batchAbortControllerRef.current) {
+                    batchAbortControllerRef.current.abort();
+                  }
+                }
+              }}
+              style={{ padding: '6px 12px', fontSize: '12px', backgroundColor: '#e74c3c', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+            >
+              ⏹ 停止
+            </button>
           </div>
         </div>
       )}

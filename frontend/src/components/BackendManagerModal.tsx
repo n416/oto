@@ -9,9 +9,10 @@ interface ServerStatus {
 interface BackendManagerModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onCleanup?: () => void;
 }
 
-export const BackendManagerModal: React.FC<BackendManagerModalProps> = ({ isOpen, onClose }) => {
+export const BackendManagerModal: React.FC<BackendManagerModalProps> = ({ isOpen, onClose, onCleanup }) => {
   const [servers, setServers] = useState<ServerStatus[]>([]);
   const [isLoading, setIsLoading] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<Record<string, string>>({});
@@ -165,6 +166,31 @@ export const BackendManagerModal: React.FC<BackendManagerModalProps> = ({ isOpen
           )}
         </div>
         
+        <div style={{ marginTop: '32px', paddingTop: '16px', borderTop: '1px solid #333' }}>
+          <h3 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#fff' }}>🧹 ストレージのクリーンアップ</h3>
+          <p style={{ fontSize: '12px', color: '#888', marginBottom: '12px', lineHeight: '1.5' }}>
+            現在のプロジェクト（台本やボイスライブラリ）で使われていない古い音声ファイルを削除し、ディスク容量を解放します。
+          </p>
+          <button
+            onClick={onCleanup}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: '#2d3748',
+              color: '#fff',
+              border: '1px solid #4a5568',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontWeight: 'bold',
+              fontSize: '13px',
+              transition: 'all 0.2s'
+            }}
+            onMouseEnter={e => e.currentTarget.style.backgroundColor = '#4a5568'}
+            onMouseLeave={e => e.currentTarget.style.backgroundColor = '#2d3748'}
+          >
+            🗑️ 未使用ファイルを一括削除
+          </button>
+        </div>
+
         <p style={{ fontSize: '11px', color: '#888', marginTop: '24px', lineHeight: '1.5' }}>
           ※ 起動ボタンを押すと、裏でPythonサーバーが立ち上がります。起動が完了して実際に使えるようになるまで数十秒かかる場合があります。<br/>
           ※ 不要なサーバーは停止しておくことで、PCのメモリ・VRAMを節約できます。

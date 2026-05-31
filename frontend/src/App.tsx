@@ -327,6 +327,37 @@ function App() {
     }
   };
 
+  const handleCleanupAudioFiles = async () => {
+    const activeUrls = new Set<string>();
+    
+    voices.forEach(v => { if (v.audioUrl) activeUrls.add(v.audioUrl); });
+    sfxs.forEach(s => { if (s.audioUrl) activeUrls.add(s.audioUrl); });
+    characters.forEach(c => { if (c.refAudioPath) activeUrls.add(c.refAudioPath); });
+    
+    Object.values(lineTakesMap).forEach(block => {
+      block.takes.forEach(t => {
+        if (t.audioUrl) activeUrls.add(t.audioUrl);
+      });
+    });
+
+    try {
+      const res = await fetch('/api/backend/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeUrls: Array.from(activeUrls) })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDialog({ type: 'alert', title: 'クリーンアップ完了', message: `未使用の音声ファイルを ${data.deletedCount} 件削除しました。` });
+      } else {
+        throw new Error(data.error || '不明なエラー');
+      }
+    } catch (e: any) {
+      console.error(e);
+      setDialog({ type: 'alert', title: 'エラー', message: `クリーンアップ中にエラーが発生しました:\n${e.message}` });
+    }
+  };
+
   // JSONファイルの読み込み
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -499,19 +530,21 @@ function App() {
     }
 
     // スクリプト（テキスト）の更新
-    const newScripts = { ...scripts };
-    layers.forEach(layer => {
-      const lines = (newScripts[layer.id] || '').split('\n');
-      if (isDelete) {
-        lines.splice(lineIndex, amount);
-      } else {
-        const padding = Array(amount).fill('');
-        // 1行下（後ろ）に追加する
-        lines.splice(lineIndex + 1, 0, ...padding);
-      }
-      newScripts[layer.id] = lines.join('\n');
+    setScripts(prevScripts => {
+      const newScripts = { ...prevScripts };
+      layers.forEach(layer => {
+        const lines = (newScripts[layer.id] || '').split('\n');
+        if (isDelete) {
+          lines.splice(lineIndex, amount);
+        } else {
+          const padding = Array(amount).fill('');
+          // 1行下（後ろ）に追加する
+          lines.splice(lineIndex + 1, 0, ...padding);
+        }
+        newScripts[layer.id] = lines.join('\n');
+      });
+      return newScripts;
     });
-    setScripts(newScripts);
 
     // テイクデータも同期してシフトする
     setLineTakesMap(prev => {
@@ -614,6 +647,123 @@ function App() {
         }
       }
     });
+  };
+
+  const getBlockDurationLines = (blockId: string, layerId: string, text: string) => {
+    const takesData = lineTakesMap[blockId];
+    let hasActiveTake = false;
+    let activeTakeUrl = "";
+    let activeTakeId = "";
+    
+    if (takesData && takesData.activeTakeId) {
+      const activeTake = takesData.takes.find(t => t.id === takesData.activeTakeId);
+      if (activeTake && activeTake.audioUrl) {
+        hasActiveTake = true;
+        activeTakeUrl = activeTake.audioUrl;
+        activeTakeId = activeTake.id;
+      }
+    }
+    
+    let isSfxOriginal = false;
+    if (layerId === 'sfx' && !hasActiveTake) {
+      const sfxMatch = text.match(/^SFX(\d{3}):/);
+      if (sfxMatch) {
+        const sfx = sfxs.find(s => s.id === `SFX${sfxMatch[1]}`);
+        if (sfx && sfx.audioUrl) {
+          isSfxOriginal = true;
+          activeTakeUrl = sfx.audioUrl;
+          activeTakeId = sfx.id;
+        }
+      }
+    }
+
+    const hasTake = hasActiveTake || isSfxOriginal || layerId === 'bgm';
+
+    let blockDuration = 1;
+    let activeTrimOffset = 0;
+    let activeTrimEnd: number | undefined = undefined;
+
+    if (activeTakeId && audioDurations[activeTakeId]) {
+      const totalDur = audioDurations[activeTakeId];
+      activeTrimEnd = totalDur;
+
+      if (hasActiveTake) {
+        const activeTake = takesData.takes.find(t => t.id === activeTakeId);
+        if (activeTake) {
+          activeTrimOffset = activeTake.trimOffset ?? 0;
+          activeTrimEnd = activeTake.trimEnd ?? totalDur;
+        }
+      } else if (isSfxOriginal) {
+        const sfxMatch = text.match(/^SFX(\d{3}):/);
+        if (sfxMatch) {
+          const sfx = sfxs.find(s => s.id === `SFX${sfxMatch[1]}`);
+          if (sfx) {
+            activeTrimOffset = sfx.trimOffset ?? 0;
+            activeTrimEnd = sfx.trimEnd ?? totalDur;
+          }
+        }
+      }
+      
+      const activeDur = Math.max(0.1, activeTrimEnd - activeTrimOffset);
+      blockDuration = Math.max(1, Math.ceil(activeDur));
+    }
+
+    return {
+      hasActiveTake,
+      activeTakeUrl,
+      activeTakeId,
+      isSfxOriginal,
+      hasTake,
+      blockDuration,
+      activeTrimOffset,
+      activeTrimEnd
+    };
+  };
+
+  const calculateMaxEndLineBefore = (targetLineIndex: number) => {
+    let maxEnd = targetLineIndex;
+    let maxSourceLineIndex = -1;
+    
+    layers.forEach(layer => {
+      const text = scripts[layer.id] || "";
+      const lines = text.split('\n');
+      lines.forEach((lineText, idx) => {
+        if (idx < targetLineIndex && lineText.trim() !== '') {
+          const blockId = `${layer.id}-${idx}`;
+          const info = getBlockDurationLines(blockId, layer.id, lineText.trim());
+          const endLine = idx + info.blockDuration;
+          if (endLine > targetLineIndex && endLine > maxEnd) {
+            maxEnd = endLine;
+            maxSourceLineIndex = idx;
+          }
+        }
+      });
+    });
+    return { maxEndLine: maxEnd, sourceLineIndex: maxSourceLineIndex };
+  };
+
+  const handleShiftTimelineForTake = (targetLineIndex: number, durationLines: number) => {
+    let newLineIndex = targetLineIndex;
+    
+    // 1. 自分自身の上に被さっているブロックがあるか
+    const { maxEndLine, sourceLineIndex } = calculateMaxEndLineBefore(targetLineIndex);
+    const padBefore = Math.max(0, maxEndLine - targetLineIndex);
+    
+    if (padBefore > 0 && sourceLineIndex !== -1) {
+      // 被さっているブロックの開始位置の直下（sourceLineIndex + 1 の位置）に padBefore 行の空行を挿入
+      // handleModifyTime は指定した lineIndex の「次」に挿入するため、sourceLineIndex を渡す
+      handleModifyTime(sourceLineIndex, padBefore, false);
+      newLineIndex = targetLineIndex + padBefore;
+    }
+
+    // 2. 生成された音声の長さ分、事後シフトを行う
+    // newLineIndex の直下（newLineIndex + 1 の位置）に挿入
+    const padAfter = Math.max(0, durationLines - 1);
+    if (padAfter > 0) {
+      handleModifyTime(newLineIndex, padAfter, false);
+    }
+
+    return newLineIndex;
   };
 
   const handleDeleteLayer = (layerId: string) => {
@@ -971,13 +1121,13 @@ function App() {
     const paddingByOriginalLine: Record<number, number> = {};
 
     for (let i = 0; i < blocksToGenerate.length; i++) {
-      if (batchStateRef.current === 'stopped') break;
+      if ((batchStateRef.current as string) === 'stopped') break;
 
-      while (batchStateRef.current === 'paused') {
+      while ((batchStateRef.current as string) === 'paused') {
         await new Promise(r => setTimeout(r, 200));
-        if (batchStateRef.current === 'stopped') break;
+        if ((batchStateRef.current as string) === 'stopped') break;
       }
-      if (batchStateRef.current === 'stopped') break;
+      if ((batchStateRef.current as string) === 'stopped') break;
 
       const block = blocksToGenerate[i];
       setBatchProgress({ current: i + 1, total: blocksToGenerate.length, status: batchStateRef.current as 'running' | 'paused' });
@@ -1500,64 +1650,14 @@ function App() {
                 const widthPercentage = 100 / visibleLayers.length;
                 const leftPercentage = layerIndex * widthPercentage;
 
-                const takesData = lineTakesMap[block.id];
-                let hasActiveTake = false;
-                let activeTakeUrl = "";
-                let activeTakeId = "";
-                
-                if (takesData && takesData.activeTakeId) {
-                  const activeTake = takesData.takes.find(t => t.id === takesData.activeTakeId);
-                  if (activeTake && activeTake.audioUrl) {
-                    hasActiveTake = true;
-                    activeTakeUrl = activeTake.audioUrl;
-                    activeTakeId = activeTake.id;
-                  }
-                }
-                
-                let isSfxOriginal = false;
-                if (block.layer === 'sfx' && !hasActiveTake) {
-                  const sfxMatch = block.text.match(/^SFX(\d{3}):/);
-                  if (sfxMatch) {
-                    const sfx = sfxs.find(s => s.id === `SFX${sfxMatch[1]}`);
-                    if (sfx && sfx.audioUrl) {
-                      isSfxOriginal = true;
-                      activeTakeUrl = sfx.audioUrl;
-                      activeTakeId = sfx.id;
-                    }
-                  }
-                }
-
-                const hasTake = hasActiveTake || isSfxOriginal || block.layer === 'bgm';
-
-                // ブロックの高さを音声の長さに合わせて計算 (トリミングを考慮)
-                let blockDuration = 1;
-                let activeTrimOffset = 0;
-                let activeTrimEnd: number | undefined = undefined;
-
-                if (activeTakeId && audioDurations[activeTakeId]) {
-                  const totalDur = audioDurations[activeTakeId];
-                  activeTrimEnd = totalDur;
-
-                  if (hasActiveTake) {
-                    const activeTake = takesData.takes.find(t => t.id === activeTakeId);
-                    if (activeTake) {
-                      activeTrimOffset = activeTake.trimOffset ?? 0;
-                      activeTrimEnd = activeTake.trimEnd ?? totalDur;
-                    }
-                  } else if (isSfxOriginal) {
-                    const sfxMatch = block.text.match(/^SFX(\d{3}):/);
-                    if (sfxMatch) {
-                      const sfx = sfxs.find(s => s.id === `SFX${sfxMatch[1]}`);
-                      if (sfx) {
-                        activeTrimOffset = sfx.trimOffset ?? 0;
-                        activeTrimEnd = sfx.trimEnd ?? totalDur;
-                      }
-                    }
-                  }
-                  
-                  const activeDur = Math.max(0.1, activeTrimEnd - activeTrimOffset);
-                  blockDuration = Math.max(1, Math.ceil(activeDur));
-                }
+                const {
+                  hasTake,
+                  blockDuration,
+                  activeTakeUrl,
+                  activeTakeId,
+                  activeTrimOffset,
+                  activeTrimEnd,
+                } = getBlockDurationLines(block.id, block.layer, block.text);
 
                 const blockHeight = (blockDuration * GRID_HEIGHT) - 8;
 
@@ -1850,6 +1950,8 @@ function App() {
         characters={characters}
         sfxs={sfxs}
         setDialog={setDialog}
+        onShiftTimeline={handleShiftTimelineForTake}
+        setLineNumber={setSelectedLine}
       />
 
       {/* 右クリックメニュー: 行番号用 */}
@@ -1966,7 +2068,7 @@ function App() {
         </div>
       )}
 
-      <BackendManagerModal isOpen={isBackendMenuOpen} onClose={() => setIsBackendMenuOpen(false)} />
+      <BackendManagerModal isOpen={isBackendMenuOpen} onClose={() => setIsBackendMenuOpen(false)} onCleanup={handleCleanupAudioFiles} />
 
       {/* カスタムダイアログの実装 */}
       {dialog && (

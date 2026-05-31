@@ -104,11 +104,23 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
   };
 
   const deleteVoice = (id: string) => {
+    const voiceToDelete = voices.find(v => v.id === id);
     setDialog({
       type: 'confirm',
       title: '音声の削除',
       message: 'この音声をライブラリから削除しますか？',
-      onConfirm: () => {
+      onConfirm: async () => {
+        if (voiceToDelete && voiceToDelete.audioUrl && voiceToDelete.audioUrl.startsWith('/uploads/')) {
+          try {
+            await fetch('/api/backend/delete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: voiceToDelete.audioUrl })
+            });
+          } catch (e) {
+            console.error("Failed to delete voice audio file:", voiceToDelete.audioUrl, e);
+          }
+        }
         setVoices(voices.filter(v => v.id !== id));
       }
     });

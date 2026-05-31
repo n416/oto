@@ -50,7 +50,7 @@ const serverLogs: Record<string, string[]> = {};
 
 function killProcessTree(pid: number) {
   return new Promise<void>((resolve) => {
-    exec(`taskkill /pid ${pid} /T /F`, (err, stdout, stderr) => {
+    exec(`taskkill /pid ${pid} /T /F`, () => {
       console.log(`[Backend Manager] Killed tree for pid ${pid}`);
       resolve();
     });
@@ -59,7 +59,7 @@ function killProcessTree(pid: number) {
 
 function checkPort(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
+    const req = http.get(`http://127.0.0.1:${port}/`, () => {
       resolve(true);
     });
     req.on('error', () => {
@@ -168,6 +168,42 @@ export function backendManagerPlugin(): Plugin {
               }
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ success: true }));
+            } catch (err: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: err.toString() }));
+            }
+          });
+          return;
+        }
+
+        if (req.method === 'POST' && req.url === '/api/backend/cleanup') {
+          let body = '';
+          req.on('data', chunk => body += chunk);
+          req.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              const activeUrls: string[] = Array.isArray(data.activeUrls) ? data.activeUrls : [];
+              const uploadsDir = path.resolve(__dirname, 'public/uploads');
+              
+              if (!fs.existsSync(uploadsDir)) {
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ success: true, deletedCount: 0 }));
+                return;
+              }
+
+              const files = fs.readdirSync(uploadsDir);
+              let deletedCount = 0;
+
+              for (const file of files) {
+                const fileUrl = `/uploads/${file}`;
+                if (!activeUrls.includes(fileUrl)) {
+                  fs.unlinkSync(path.join(uploadsDir, file));
+                  deletedCount++;
+                }
+              }
+              
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: true, deletedCount }));
             } catch (err: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: err.toString() }));

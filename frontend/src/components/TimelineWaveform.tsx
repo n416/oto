@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 
 interface TimelineWaveformProps {
   audioUrl: string;
@@ -10,7 +10,6 @@ interface TimelineWaveformProps {
 
 export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioUrl, color, trimOffset, trimEnd, onDurationLoaded }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [duration, setDuration] = useState<number | null>(null);
 
   useEffect(() => {
     let isCancelled = false;
@@ -27,7 +26,6 @@ export const TimelineWaveform: React.FC<TimelineWaveformProps> = ({ audioUrl, co
         await new Promise<void>((resolve, reject) => {
           audio.addEventListener('loadedmetadata', () => {
             if (isCancelled) return;
-            setDuration(audio.duration);
             if (onDurationLoaded) onDurationLoaded(audio.duration);
             resolve();
           });

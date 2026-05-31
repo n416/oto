@@ -98,7 +98,6 @@ export async function exportWavFiles(
   }[] = [];
 
   // スクリプトを解析してエクスポート対象を抽出
-  const maxLines = Math.max(...Object.values(scripts).map(t => t.split('\n').length));
   
   for (const layer of layers) {
     if (!layer.visibleInTimeline) continue;

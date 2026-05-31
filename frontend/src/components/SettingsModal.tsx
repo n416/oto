@@ -18,14 +18,17 @@ interface SettingsModalProps {
   characters: CharacterData[];
   sfxs: SfxData[];
   setDialog: (dialog: DialogOptions | null) => void;
+  onShiftTimeline?: (targetLineIndex: number, durationLines: number) => number;
+  setLineNumber?: (lineNumber: number) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ 
-  isOpen, onClose, lineNumber, layer, text, fullScript, blockId, lineTakesMap, setLineTakesMap, characters, sfxs, setDialog 
+  isOpen, onClose, lineNumber, layer, text, fullScript, blockId, lineTakesMap, setLineTakesMap, characters, sfxs, setDialog, onShiftTimeline, setLineNumber 
 }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [autoShift, setAutoShift] = useState(true);
 
   if (!isOpen) return null;
 
@@ -76,6 +79,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }
         };
       });
+
+      if (autoShift && onShiftTimeline && lineNumber !== null) {
+        const duration = newTake.duration || 1;
+        const durationLines = Math.max(1, Math.ceil(duration));
+        const targetLineIndex = lineNumber - 1;
+        
+        // シフト処理を呼び出し、新しい行番号を受け取る
+        const newLineIndex = onShiftTimeline(targetLineIndex, durationLines);
+        
+        // 行番号が変わった場合は、モーダルが参照している行番号を更新する
+        if (newLineIndex !== targetLineIndex && setLineNumber) {
+          setLineNumber(newLineIndex + 1);
+        }
+      }
 
     } catch (error: any) {
       console.error(error);
@@ -318,27 +335,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
           
           {layer !== 'bgm' && (
-            <button 
-              onClick={handleGenerate}
-              disabled={isGenerating}
-              style={{ 
-                width: '100%', 
-                padding: '8px', 
-                backgroundColor: isGenerating ? '#4a5568' : '#2d3748', 
-                color: isGenerating ? '#a0aec0' : '#63b3ed', 
-                border: '1px solid #4a5568', 
-                borderRadius: '4px', 
-                cursor: isGenerating ? 'not-allowed' : 'pointer', 
-                fontSize: '13px', 
-                display: 'flex',
-                justifyContent: 'center',
-                alignItems: 'center',
-                gap: '6px',
-                transition: 'all 0.2s'
-              }}
-            >
-              <span>{isGenerating ? '⏳' : '🎲'}</span> {isGenerating ? '生成中...' : '新しいTakeを生成する (ガチャ)'}
-            </button>
+            <>
+              <label style={{ display: 'flex', alignItems: 'center', fontSize: '12px', color: '#ccc', marginBottom: '8px', cursor: 'pointer' }}>
+                <input 
+                  type="checkbox" 
+                  checked={autoShift} 
+                  onChange={e => setAutoShift(e.target.checked)}
+                  style={{ marginRight: '6px', cursor: 'pointer' }}
+                />
+                生成した音声が重ならないように後続を下にずらす
+              </label>
+              <button 
+                onClick={handleGenerate}
+                disabled={isGenerating}
+                style={{ 
+                  width: '100%', 
+                  padding: '8px', 
+                  backgroundColor: isGenerating ? '#4a5568' : '#2d3748', 
+                  color: isGenerating ? '#a0aec0' : '#63b3ed', 
+                  border: '1px solid #4a5568', 
+                  borderRadius: '4px', 
+                  cursor: isGenerating ? 'not-allowed' : 'pointer', 
+                  fontSize: '13px', 
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <span>{isGenerating ? '⏳' : '🎲'}</span> {isGenerating ? '生成中...' : '新しいTakeを生成する (ガチャ)'}
+              </button>
+            </>
           )}
 
           <label 

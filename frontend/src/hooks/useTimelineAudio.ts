@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { ScriptData, LayerInfo, SfxData, LineTakes } from '../App';
 
-type AudioQueue = Record<number, { url: string; manualOffset?: number; manualEnd?: number }[]>;
+type AudioQueue = Record<number, { url: string; manualOffset?: number; manualEnd?: number; volume?: number; pan?: number; }[]>;
 
 // 無音部分をスキップするためのオフセットをキャッシュする
 const trimCache = new Map<string, number>();

@@ -58,7 +58,11 @@ export async function generateTake(
       signal
     });
     
-    if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("Irodori API Error:", res.status, errText);
+      throw new Error(`HTTP error! status: ${res.status}. Detail: ${errText}`);
+    }
     const resultData = await res.json();
     audioUrl = resultData.urls?.[0] || "#";
 

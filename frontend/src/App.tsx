@@ -14,6 +14,49 @@ window.addEventListener('unhandledrejection', (e) => {
 import type { IJsonModel } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css';
 import { SettingsModal } from './components/SettingsModal';
+
+// 設定モーダルの表示状態をAppから切り離すためのラッパー
+const SettingsModalWrapper = ({ 
+  layer, 
+  scripts, 
+  lineTakesMap, 
+  setLineTakesMap, 
+  characters, 
+  sfxs, 
+  setDialog, 
+  onShiftTimeline 
+}: any) => {
+  const [selectedLine, setSelectedLine] = useState<number | null>(null);
+
+  useEffect(() => {
+    const handleOpen = (e: any) => {
+      if (e.detail && typeof e.detail.lineNumber === 'number') {
+        setSelectedLine(e.detail.lineNumber);
+      }
+    };
+    window.addEventListener('openSettingsModal', handleOpen);
+    return () => window.removeEventListener('openSettingsModal', handleOpen);
+  }, []);
+
+  return (
+    <SettingsModal 
+      isOpen={selectedLine !== null} 
+      onClose={() => setSelectedLine(null)} 
+      lineNumber={selectedLine} 
+      layer={layer}
+      text={selectedLine ? (scripts[layer] || '').split('\n')[selectedLine - 1] : ''}
+      fullScript={scripts[layer] || ''}
+      blockId={selectedLine ? `${layer}-${selectedLine - 1}` : ''}
+      lineTakesMap={lineTakesMap}
+      setLineTakesMap={setLineTakesMap}
+      characters={characters}
+      sfxs={sfxs}
+      setDialog={setDialog}
+      onShiftTimeline={onShiftTimeline}
+      setLineNumber={setSelectedLine}
+    />
+  );
+};
 import { BackendManagerModal } from './components/BackendManagerModal';
 import { CharacterSettings, type CharacterData } from './components/CharacterSettings';
 import { VoiceGenerator } from './components/VoiceGenerator';
@@ -949,9 +992,6 @@ function App() {
     };
   }, [isDragging, maxLines]);
 
-  // モーダル管理用のState
-  const [selectedLine, setSelectedLine] = useState<number | null>(null);
-
   const syncSfxNamesToLibrary = (text: string, cursor: number) => {
     const sfxPattern = /SFX(\d{3}):([^\n]+)/g;
     let match;
@@ -1471,16 +1511,26 @@ function App() {
                           window.OtoIdeAudioTokens = {};
                         }
                         
-                        // クリックされた行番号の SettingsModal を開く
-                        setSelectedLine(position.lineNumber);
+                        // クリックした歯車アイコンの行番号(lineNumber)をイベント経由でSettingsModalWrapperに渡す
+                        window.dispatchEvent(new CustomEvent('openSettingsModal', { 
+                          detail: { lineNumber: position.lineNumber }
+                        }));
                       }
                     }
                   });
 
+                  let cursorTimer: any = null;
                   editor.onDidChangeCursorPosition((e: any) => {
-                    const offset = editor.getModel()?.getOffsetAt(e.position) || 0;
-                    const text = editor.getValue();
-                    updatePlayheadFromCursor(offset, text);
+                    if (cursorTimer) clearTimeout(cursorTimer);
+                    cursorTimer = setTimeout(() => {
+                      // 複数行（範囲）を選択している時はプレイヘッドの同期をスキップして重さを防ぐ
+                      const selection = editor.getSelection();
+                      if (selection && !selection.isEmpty()) return;
+
+                      const offset = editor.getModel()?.getOffsetAt(e.position) || 0;
+                      const text = editor.getValue();
+                      updatePlayheadFromCursor(offset, text);
+                    }, 50); // 50msのデバウンスをかけて再描画の頻度を落とす
                   });
 
                   setTimeout(() => {
@@ -1766,7 +1816,9 @@ function App() {
                     }}
                     onClick={() => {
                       setActiveTab(block.layer);
-                      setSelectedLine(block.lineIndex + 1);
+                      window.dispatchEvent(new CustomEvent('openSettingsModal', { 
+                        detail: { lineNumber: block.lineIndex + 1 }
+                      }));
                     }}
                     style={{ 
                       position: 'absolute', 
@@ -2030,21 +2082,15 @@ function App() {
         />
       </div>
 
-      <SettingsModal 
-        isOpen={selectedLine !== null} 
-        onClose={() => setSelectedLine(null)} 
-        lineNumber={selectedLine} 
+      <SettingsModalWrapper 
         layer={activeTab}
-        text={selectedLine ? (scripts[activeTab] || '').split('\n')[selectedLine - 1] : ''}
-        fullScript={scripts[activeTab] || ''}
-        blockId={selectedLine ? `${activeTab}-${selectedLine - 1}` : ''}
+        scripts={scripts}
         lineTakesMap={lineTakesMap}
         setLineTakesMap={setLineTakesMap}
         characters={characters}
         sfxs={sfxs}
         setDialog={setDialog}
         onShiftTimeline={handleShiftTimelineForTake}
-        setLineNumber={setSelectedLine}
       />
 
       {/* 右クリックメニュー: 行番号用 */}

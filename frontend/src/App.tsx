@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Layout, Model, TabNode, Actions } from 'flexlayout-react';
 import Editor, { useMonaco } from '@monaco-editor/react';
 
@@ -55,6 +55,55 @@ const SettingsModalWrapper = ({
       onShiftTimeline={onShiftTimeline}
       setLineNumber={setSelectedLine}
     />
+  );
+};
+
+// タイムラインの再生ヘッド（赤い線）をAppから切り離すためのラッパー
+const PlayheadLine = ({ setIsPlaying, setIsDragging }: any) => {
+  const [playheadY, setLocalPlayheadY] = useState(0);
+
+  useEffect(() => {
+    const handleUpdate = (e: any) => {
+      if (e.detail && typeof e.detail.y === 'number') {
+        setLocalPlayheadY(e.detail.y);
+      }
+    };
+    window.addEventListener('playheadUpdate', handleUpdate);
+    window.dispatchEvent(new CustomEvent('requestInitialPlayhead'));
+    return () => window.removeEventListener('playheadUpdate', handleUpdate);
+  }, []);
+
+  return (
+    <div 
+      style={{
+        position: 'absolute',
+        top: `${playheadY}px`,
+        left: '40px', // 行番号の右から始まる
+        right: 0,
+        height: '2px',
+        backgroundColor: '#e74c3c',
+        zIndex: 10,
+        cursor: 'ns-resize',
+        boxShadow: '0 0 6px rgba(231, 76, 60, 0.8)'
+      }}
+      onMouseDown={(e) => {
+        e.preventDefault();
+        setIsDragging(true);
+        setIsPlaying(false); // ドラッグ中は再生を停止する
+      }}
+    >
+      {/* 左端の三角形のつまみ */}
+      <div style={{
+        position: 'absolute',
+        left: '-10px',
+        top: '-4px',
+        width: 0,
+        height: 0,
+        borderTop: '5px solid transparent',
+        borderBottom: '5px solid transparent',
+        borderLeft: '10px solid #e74c3c',
+      }} />
+    </div>
   );
 };
 import { BackendManagerModal } from './components/BackendManagerModal';
@@ -279,8 +328,35 @@ function App() {
 
   const [activeTab, setActiveTab] = useState<LayerType>(layers[0]?.id || 'dialogue');
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playheadY, setPlayheadY] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+
+  // パフォーマンス最適化のため、playheadYはStateではなくRefとイベントバスで管理
+  const playheadYRef = useRef(0);
+  
+  const updatePlayheadY = useCallback((newY: number | ((prev: number) => number)) => {
+    const nextY = typeof newY === 'function' ? newY(playheadYRef.current) : newY;
+    if (playheadYRef.current !== nextY) {
+      playheadYRef.current = nextY;
+      window.dispatchEvent(new CustomEvent('playheadUpdate', { detail: { y: nextY } }));
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleRequest = (e: any) => {
+      if (e.type === 'requestPlayheadUpdate') {
+        updatePlayheadY(e.detail.y);
+      } else if (e.type === 'requestInitialPlayhead') {
+        window.dispatchEvent(new CustomEvent('playheadUpdate', { detail: { y: playheadYRef.current } }));
+      }
+    };
+    window.addEventListener('requestPlayheadUpdate', handleRequest);
+    window.addEventListener('requestInitialPlayhead', handleRequest);
+    return () => {
+      window.removeEventListener('requestPlayheadUpdate', handleRequest);
+      window.removeEventListener('requestInitialPlayhead', handleRequest);
+    };
+  }, [updatePlayheadY]);
+
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, lineIndex: number } | null>(null);
   const [timelineContextMenu, setTimelineContextMenu] = useState<{ x: number, y: number } | null>(null);
@@ -413,11 +489,12 @@ function App() {
   // 再生ヘッドが動いた時、または再生状態が変わった時にオーディオを制御
   useEffect(() => {
     if (isPlaying) {
-      tick(playheadY / GRID_HEIGHT);
+      tick(playheadYRef.current / GRID_HEIGHT);
     } else {
       stopAll();
     }
-  }, [playheadY, isPlaying, tick, stopAll]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, tick, stopAll]);
 
   // テキストが変更されるたびにローカルストレージに自動保存
   useEffect(() => {
@@ -564,8 +641,8 @@ function App() {
         if (tickCount % 60 === 0) {
           console.log(`[TimerWorker] tick received. delta: ${delta}ms. current isPlaying:`, isPlaying);
         }
-        // 1秒間に 60px (1行分) 進む想定
-        setPlayheadY(prev => prev + (delta / 1000) * GRID_HEIGHT);
+        // 1秒間に 60px (1行分) 進むと想定
+        updatePlayheadY((prev: number) => prev + (delta / 1000) * GRID_HEIGHT);
       }
     };
 
@@ -583,25 +660,29 @@ function App() {
 
   // playheadY の位置に合わせてタイムラインのスクロール位置を自動追従させる
   useEffect(() => {
-    if (timelineRef.current) {
-      const container = timelineRef.current;
-      const y = playheadY;
-      const margin = 50; // 上下のマージン
+    const handlePlayheadUpdate = (e: any) => {
+      if (timelineRef.current && isPlaying) {
+        const container = timelineRef.current;
+        const y = e.detail.y;
+        const margin = 50; // 上下のマージン
 
-      // 画面より下に隠れている場合
-      if (y > container.scrollTop + container.clientHeight - margin) {
-        container.scrollTop = y - container.clientHeight + margin;
+        // 画面より下に隠れている場合
+        if (y > container.scrollTop + container.clientHeight - margin) {
+          container.scrollTop = y - container.clientHeight + margin;
+        }
+        // 画面より上に隠れている場合
+        else if (y < container.scrollTop + margin) {
+          container.scrollTop = y - margin;
+        }
       }
-      // 画面より上に隠れている場合
-      else if (y < container.scrollTop + margin) {
-        container.scrollTop = y - margin;
-      }
-    }
-  }, [playheadY]);
+    };
+    window.addEventListener('playheadUpdate', handlePlayheadUpdate);
+    return () => window.removeEventListener('playheadUpdate', handlePlayheadUpdate);
+  }, [isPlaying]);
 
   const handlePlayToggle = () => {
-    if (!isPlaying && playheadY >= maxLines * GRID_HEIGHT) {
-      setPlayheadY(0); // 最後までいってたら最初から再生
+    if (!isPlaying && playheadYRef.current >= maxLines * GRID_HEIGHT) {
+      updatePlayheadY(0); // 最後まで行っていたら最初から再生
     }
     setIsPlaying(!isPlaying);
   };
@@ -973,7 +1054,7 @@ function App() {
         if (newY < 0) newY = 0;
         if (newY > maxY) newY = maxY;
         
-        setPlayheadY(newY);
+        updatePlayheadY(newY);
       }
     };
 
@@ -1209,7 +1290,7 @@ function App() {
     }
     
     const y = (lineIndex + (ratio * blockDurationLines)) * GRID_HEIGHT;
-    setPlayheadY(y);
+    updatePlayheadY(y);
   };
 
   const timelineBlocks = useMemo(() => {
@@ -1427,8 +1508,6 @@ function App() {
     if (component === "preview") {
       return (
         <PreviewPane
-          playheadY={playheadY}
-          setPlayheadY={setPlayheadY}
           isPlaying={isPlaying}
           setIsPlaying={setIsPlaying}
           maxLines={maxLines}
@@ -1627,37 +1706,7 @@ function App() {
             </div>
 
             {/* 再生ヘッド (赤い線) */}
-            <div 
-              style={{
-                position: 'absolute',
-                top: `${playheadY}px`,
-                left: '40px', // 行番号の右から始まる
-                right: 0,
-                height: '2px',
-                backgroundColor: '#e74c3c',
-                zIndex: 10,
-                cursor: 'ns-resize',
-                boxShadow: '0 0 6px rgba(231, 76, 60, 0.8)'
-              }}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                setIsDragging(true);
-                setIsPlaying(false); // ドラッグ中は再生を停止する
-              }}
-            >
-              {/* 左端の三角形のつまみ */}
-              <div style={{
-                position: 'absolute',
-                left: '-10px',
-                top: '-6px',
-                width: 0,
-                height: 0,
-                borderTop: '7px solid transparent',
-                borderBottom: '7px solid transparent',
-                borderLeft: '10px solid #e74c3c',
-                cursor: 'grab'
-              }} />
-            </div>
+            <PlayheadLine isPlaying={isPlaying} setIsPlaying={setIsPlaying} setIsDragging={setIsDragging} />
 
             <div 
               data-timeline-bg="true" 

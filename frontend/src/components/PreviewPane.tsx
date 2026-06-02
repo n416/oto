@@ -2,8 +2,7 @@ import React from 'react';
 import type { ScriptData } from '../App';
 
 interface PreviewPaneProps {
-  playheadY: number;
-  setPlayheadY: (y: number) => void;
+
   isPlaying: boolean;
   setIsPlaying: (playing: boolean) => void;
   maxLines: number;
@@ -13,8 +12,21 @@ interface PreviewPaneProps {
 }
 
 export const PreviewPane: React.FC<PreviewPaneProps> = ({
-  playheadY, setPlayheadY, isPlaying, setIsPlaying, maxLines, GRID_HEIGHT, cuts, scripts
+  isPlaying, setIsPlaying, maxLines, GRID_HEIGHT, cuts, scripts
 }) => {
+  const [playheadY, setLocalPlayheadY] = React.useState(0);
+
+  React.useEffect(() => {
+    const handleUpdate = (e: any) => {
+      if (e.detail && typeof e.detail.y === 'number') {
+        setLocalPlayheadY(e.detail.y);
+      }
+    };
+    window.addEventListener('playheadUpdate', handleUpdate);
+    // 初期値を取得するためのリクエスト（App側で処理）
+    window.dispatchEvent(new CustomEvent('requestInitialPlayhead'));
+    return () => window.removeEventListener('playheadUpdate', handleUpdate);
+  }, []);
   const currentSeconds = playheadY / GRID_HEIGHT;
   const totalSeconds = maxLines;
 
@@ -83,7 +95,9 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
           max={maxLines * GRID_HEIGHT} 
           value={playheadY}
           onChange={(e) => {
-            setPlayheadY(parseFloat(e.target.value));
+            const val = parseFloat(e.target.value);
+            setLocalPlayheadY(val);
+            window.dispatchEvent(new CustomEvent('requestPlayheadUpdate', { detail: { y: val } }));
             setIsPlaying(false);
           }}
           style={{ flex: 1, cursor: 'pointer', height: '4px', appearance: 'none', backgroundColor: '#444', borderRadius: '2px', outline: 'none' }}

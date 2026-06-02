@@ -3,6 +3,14 @@ import { Layout, Model, TabNode, Actions } from 'flexlayout-react';
 import Editor, { useMonaco } from '@monaco-editor/react';
 
 let hasRegisteredMonacoProviders = false;
+
+// Monaco Editor 内部のPromiseキャンセルによる不要なエラーログを握りつぶす
+window.addEventListener('unhandledrejection', (e) => {
+  if (e.reason && e.reason.type === 'cancelation') {
+    e.preventDefault();
+  }
+});
+
 import type { IJsonModel } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css';
 import { SettingsModal } from './components/SettingsModal';
@@ -339,7 +347,7 @@ function App() {
                 
                 if (actualPadding > 0) {
                   ranges.push({
-                    start: i + 2, // テキストがある行の次から
+                    start: i + 1, // テキストがある行を親として折りたたむ
                     end: i + 1 + actualPadding, // パディングの終わりまで
                     kind: monaco.languages.FoldingRangeKind.Region
                   });

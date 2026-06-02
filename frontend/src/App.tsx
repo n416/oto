@@ -1,5 +1,8 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { Layout, Model, TabNode, Actions } from 'flexlayout-react';
+import Editor, { useMonaco } from '@monaco-editor/react';
+
+let hasRegisteredMonacoProviders = false;
 import type { IJsonModel } from 'flexlayout-react';
 import 'flexlayout-react/style/dark.css';
 import { SettingsModal } from './components/SettingsModal';
@@ -14,6 +17,33 @@ import { generateTake } from './utils/generateTake';
 import { deleteAudioFiles } from './utils/deleteAudioFiles';
 import { TimelineWaveform } from './components/TimelineWaveform';
 import TimerWorker from './workers/timerWorker?worker';
+
+declare global {
+  interface Window {
+    monaco: any;
+    OtoIdeAudioTokens: any;
+  }
+}
+
+// Monaco Editorのオプション
+const EDITOR_OPTIONS: any = {
+  fontSize: 14,
+  fontFamily: 'Consolas, Monaco, monospace',
+  lineHeight: 21,
+  minimap: { enabled: false },
+  wordWrap: 'on',
+  lineNumbers: 'on',
+  folding: true,
+  showFoldingControls: 'always',
+  scrollBeyondLastLine: false,
+  wordBasedSuggestions: 'off',
+  quickSuggestions: false,
+  contextmenu: false,
+  glyphMargin: true,
+  lineNumbersMinChars: 3,
+  fixedOverflowWidgets: true,
+  lightbulb: { enabled: false }
+};
 
 type LayerType = string;
 
@@ -36,6 +66,7 @@ export interface VoiceData {
   audioUrl: string;
   source: 'generated' | 'imported';
   timestamp: string;
+  parentId?: string;
 }
 
 export interface SfxData {
@@ -202,6 +233,7 @@ function App() {
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, lineIndex: number } | null>(null);
   const [timelineContextMenu, setTimelineContextMenu] = useState<{ x: number, y: number } | null>(null);
+  const [isEditorReady, setIsEditorReady] = useState(false);
   
   const [scripts, setScripts] = useState<ScriptData>(() => {
     const saved = localStorage.getItem('oto_ide_scripts');
@@ -263,6 +295,69 @@ function App() {
 
   // オーディオマネージャーの初期化
   const { stopAll, tick } = useTimelineAudio(scripts, layers, sfxs, lineTakesMap);
+
+  const monaco = useMonaco();
+  const lineTakesMapRef = useRef(lineTakesMap);
+  const audioDurationsRef = useRef(audioDurations);
+  const activeTabRef = useRef(activeTab);
+  
+  useEffect(() => { lineTakesMapRef.current = lineTakesMap; }, [lineTakesMap]);
+  useEffect(() => { audioDurationsRef.current = audioDurations; }, [audioDurations]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  useEffect(() => {
+    if (monaco && !hasRegisteredMonacoProviders) {
+      hasRegisteredMonacoProviders = true;
+      const foldingProvider = monaco.languages.registerFoldingRangeProvider('plaintext', {
+        provideFoldingRanges: (model: any) => {
+          const ranges = [];
+          const lines = model.getLinesContent();
+          const layerId = activeTabRef.current;
+          
+          for (let i = 0; i < lines.length; i++) {
+            const text = lines[i];
+            if (text.trim() !== '') {
+              const blockId = `${layerId}-${i}`;
+              const takesData = lineTakesMapRef.current[blockId];
+              let durationLines = 1;
+              
+              if (takesData && takesData.activeTakeId && audioDurationsRef.current[takesData.activeTakeId]) {
+                const duration = audioDurationsRef.current[takesData.activeTakeId];
+                durationLines = Math.max(1, Math.ceil(duration));
+              }
+              
+              const paddingCount = durationLines - 1;
+              if (paddingCount > 0) {
+                let actualPadding = 0;
+                for (let j = 1; j <= paddingCount; j++) {
+                  if (i + j < lines.length && lines[i + j].trim() === '') {
+                    actualPadding++;
+                  } else {
+                    break;
+                  }
+                }
+                
+                if (actualPadding > 0) {
+                  ranges.push({
+                    start: i + 2, // テキストがある行の次から
+                    end: i + 1 + actualPadding, // パディングの終わりまで
+                    kind: monaco.languages.FoldingRangeKind.Region
+                  });
+                  i += actualPadding;
+                }
+              }
+            }
+          }
+          return ranges;
+        }
+      });
+      
+      return () => {
+        foldingProvider.dispose();
+        hasRegisteredMonacoProviders = false;
+      };
+    }
+  }, [monaco]);
 
   // 再生ヘッドが動いた時、または再生状態が変わった時にオーディオを制御
   useEffect(() => {
@@ -787,10 +882,34 @@ function App() {
     });
   };
 
-  // スクロール同期・ドラッグ領域用のRef
-  const editorRef = useRef<HTMLTextAreaElement>(null);
-  const gutterRef = useRef<HTMLDivElement>(null);
+  // テキストエディタ関連のRef
+  const editorRef = useRef<any>(null);
+  const decorationsRef = useRef<string[]>([]);
   const timelineRef = useRef<HTMLDivElement>(null);
+
+  // テキストが存在する行の特定と、設定アイコンのデコレーション追加
+  useEffect(() => {
+    if (!editorRef.current || !window.monaco) return;
+    const editor = editorRef.current;
+    
+    const text = scripts[activeTab] || "";
+    const lines = text.split('\n');
+    const newDecorations: any[] = [];
+
+    lines.forEach((lineText, lineIndex) => {
+      if (!lineText.trim()) return;
+
+      newDecorations.push({
+        range: new window.monaco.Range(lineIndex + 1, 1, lineIndex + 1, 1),
+        options: {
+          isWholeLine: false,
+          glyphMarginClassName: 'settings-glyph'
+        }
+      });
+    });
+
+    decorationsRef.current = editor.deltaDecorations(decorationsRef.current, newDecorations);
+  }, [scripts, activeTab, isEditorReady]);
 
   // ドラッグ操作の実装
   useEffect(() => {
@@ -891,10 +1010,6 @@ function App() {
     }
   };
 
-  const handleCompositionStart = () => {
-    isComposingRef.current = true;
-  };
-
   const updateScriptAndSync = (layerId: string, newText: string) => {
     const oldText = scripts[layerId] || '';
     if (oldText === newText) return;
@@ -988,22 +1103,9 @@ function App() {
     }
   };
 
-  const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
-    isComposingRef.current = false;
-    const target = e.target as HTMLTextAreaElement;
-    const newValue = target.value;
-    const cursor = target.selectionStart;
-
-    const updatedText = syncSfxNamesToLibrary(newValue, cursor);
-    if (updatedText !== newValue) {
-      setCursorPos(cursor);
-    }
-    updateScriptAndSync(activeTab, updatedText);
-  };
-
-  const handleScriptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newValue = e.target.value;
-    const cursor = e.target.selectionStart;
+  const handleScriptChange = (value: string | undefined) => {
+    const newValue = value || '';
+    const cursor = editorRef.current?.getPosition() ? editorRef.current.getModel()?.getOffsetAt(editorRef.current.getPosition()) || 0 : 0;
 
     const textBeforeCursor = newValue.substring(0, cursor);
     if (textBeforeCursor.endsWith('SFX')) {
@@ -1025,23 +1127,19 @@ function App() {
       setCursorPos(cursor);
     }
     updateScriptAndSync(activeTab, updatedText);
-    updatePlayheadFromCursor(e.target);
+    updatePlayheadFromCursor(cursor, newValue);
   };
 
   useEffect(() => {
     if (cursorPos !== null && editorRef.current) {
-      editorRef.current.setSelectionRange(cursorPos, cursorPos);
       setCursorPos(null);
     }
   }, [scripts, cursorPos]);
 
-  const updatePlayheadFromCursor = (target: HTMLTextAreaElement) => {
-    if (isPlaying) return; // 再生中は自動移動を優先
+  const updatePlayheadFromCursor = (offset: number, text: string) => {
+    if (isPlaying) return; // 再生中は移動無効
     
-    const cursor = target.selectionStart;
-    const text = target.value;
-    
-    const textBeforeCursor = text.substring(0, cursor);
+    const textBeforeCursor = text.substring(0, offset);
     const lines = textBeforeCursor.split('\n');
     const lineIndex = lines.length - 1;
     const colIndex = lines[lines.length - 1].length;
@@ -1064,12 +1162,6 @@ function App() {
     
     const y = (lineIndex + (ratio * blockDurationLines)) * GRID_HEIGHT;
     setPlayheadY(y);
-  };
-
-  const handleScroll = () => {
-    if (editorRef.current && gutterRef.current) {
-      gutterRef.current.scrollTop = editorRef.current.scrollTop;
-    }
   };
 
   const timelineBlocks = useMemo(() => {
@@ -1300,7 +1392,6 @@ function App() {
     }
 
     if (component === "editor") {
-      const currentLinesCount = Math.max((scripts[activeTab] || '').split('\n').length, 20);
       
       return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', backgroundColor: '#1e1e1e' }}>
@@ -1344,56 +1435,50 @@ function App() {
           </div>
           
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-            {/* 行番号ガター */}
-            <div 
-              ref={gutterRef}
-              style={{ 
-                width: '40px', 
-                backgroundColor: '#252526', 
-                borderRight: '1px solid #333', 
-                color: '#666', 
-                textAlign: 'right', 
-                padding: '16px 8px 16px 0', 
-                fontSize: '14px', 
-                fontFamily: 'Consolas, Monaco, monospace', 
-                lineHeight: '21px', // textareaと完全に一致させる
-                overflowY: 'hidden', // スクロールバーは隠す
-                boxSizing: 'border-box',
-                userSelect: 'none'
-              }}
-            >
-              {[...Array(currentLinesCount)].map((_, i) => (
-                <div 
-                  key={i} 
-                  onClick={() => setSelectedLine(i + 1)}
-                  style={{ cursor: 'pointer' }}
-                  onMouseEnter={(e) => e.currentTarget.style.color = '#fff'}
-                  onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
-                  title={`Line ${i + 1} の設定を開く`}
-                >
-                  L{i + 1}
-                </div>
-              ))}
-            </div>
-            
             {/* テキストエディタ */}
             <div style={{ flex: 1, display: 'flex', position: 'relative' }}>
-              <textarea 
-                ref={editorRef}
-                value={scripts[activeTab] || ''}
+              <Editor
+                height="100%"
+                language="plaintext"
+                theme="vs-dark"
+                path={activeTab} // Monacoに別のファイルとして認識させ、タブごとのUndo履歴やカーソル位置を保持する
+                defaultValue={scripts[activeTab] || ''}
                 onChange={handleScriptChange}
-                onClick={(e) => updatePlayheadFromCursor(e.currentTarget)}
-                onKeyUp={(e) => {
-                  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
-                    updatePlayheadFromCursor(e.currentTarget);
-                  }
+                options={EDITOR_OPTIONS}
+                onMount={(editor, monaco) => {
+                  editorRef.current = editor;
+                  window.monaco = monaco;
+                  setIsEditorReady(true); // エディタのマウント完了を通知してデコレーションを走らせる
+
+                  // グリフマージン（設定アイコン）がクリックされた時の処理
+                  editor.onMouseDown((e: any) => {
+                    if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+                      const position = e.target.position;
+                      if (position) {
+                        // 既存の音声をすべて停止する
+                        if (window.OtoIdeAudioTokens) {
+                          for (const t of Object.values(window.OtoIdeAudioTokens) as any[]) {
+                            t.cancel();
+                          }
+                          window.OtoIdeAudioTokens = {};
+                        }
+                        
+                        // クリックされた行番号の SettingsModal を開く
+                        setSelectedLine(position.lineNumber);
+                      }
+                    }
+                  });
+
+                  editor.onDidChangeCursorPosition((e: any) => {
+                    const offset = editor.getModel()?.getOffsetAt(e.position) || 0;
+                    const text = editor.getValue();
+                    updatePlayheadFromCursor(offset, text);
+                  });
+
+                  setTimeout(() => {
+                    editor.getAction('editor.foldAll')?.run()?.catch(() => {});
+                  }, 100);
                 }}
-                onCompositionStart={handleCompositionStart}
-                onCompositionEnd={handleCompositionEnd}
-                onScroll={handleScroll}
-                spellCheck={false}
-                style={{ flex: 1, backgroundColor: '#1e1e1e', color: '#d4d4d4', border: 'none', padding: '16px', fontSize: '14px', fontFamily: 'Consolas, Monaco, monospace', lineHeight: '21px', resize: 'none', outline: 'none', whiteSpace: 'pre', overflowY: 'auto' }}
-                placeholder={`ここに ${layers.find(l => l.id === activeTab)?.name || ''} の台本を記述してください...`}
               />
               
               {sfxAutocomplete && (

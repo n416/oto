@@ -238,5 +238,5 @@ export const useTimelineAudio = (
     prevTimeRef.current = currentTimeSeconds;
   }, [playLine]);
 
-  return { stopAll, tick, resetTick: () => { prevTimeRef.current = null; } };
+  return { stopAll, tick, resetTick: () => { prevTimeRef.current = null; }, playLine };
 };

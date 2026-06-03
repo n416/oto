@@ -1,2 +1,15 @@
 outputs/
 .vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.log
+
+# Node.js
+node_modules/
+dist/
+.env

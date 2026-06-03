@@ -212,6 +212,7 @@ export type DialogOptions = {
   message: string;
   defaultValue?: string;
   onConfirm?: (val?: string) => void;
+  onCancel?: () => void;
 };
 
 // ----------------------------------------------------
@@ -283,6 +284,18 @@ const defaultLayers: LayerInfo[] = [
 ];
 
 function App() {
+  const isCutRef = useRef(false);
+  const deletedTakesCacheRef = useRef<Record<string, LineTakes>>({});
+
+  useEffect(() => {
+    const handleCut = () => {
+      isCutRef.current = true;
+      setTimeout(() => isCutRef.current = false, 100);
+    };
+    document.addEventListener('cut', handleCut);
+    return () => document.removeEventListener('cut', handleCut);
+  }, []);
+
   const [layoutModel, setLayoutModel] = useState<Model>(() => {
     const saved = localStorage.getItem('oto_ide_layout');
     if (saved) {
@@ -1169,6 +1182,44 @@ function App() {
     const netShift = addedCount - removedCount;
 
     if (netShift !== 0) {
+      const deletedTakesInfo: { text: string, data: LineTakes }[] = [];
+      
+      if (removedCount > 0) {
+        const startIndex = addedCount === 0 ? 0 : 1;
+        for (let i = startIndex; i < removedCount; i++) {
+          const id = `${layerId}-${changeIndex + i}`;
+          if (lineTakesMapRef.current[id] && lineTakesMapRef.current[id].takes.length > 0) {
+            deletedTakesInfo.push({ text: oldLines[changeIndex + i], data: lineTakesMapRef.current[id] });
+          }
+        }
+      }
+
+      if (deletedTakesInfo.length > 0) {
+        deletedTakesInfo.forEach(info => {
+          if (info.text.trim()) {
+            deletedTakesCacheRef.current[info.text] = info.data;
+          }
+        });
+
+        if (!isCutRef.current && addedCount === 0) {
+          setDialog({
+            type: 'confirm',
+            title: '音声の削除',
+            message: '当該行に音声（Take）が紐づけられています。削除すると音声ファイルも消去されますがよろしいですか？',
+            onConfirm: () => {
+              const takesToDelete = deletedTakesInfo.flatMap(info => info.data.takes);
+              deleteAudioFiles(takesToDelete);
+              deletedTakesInfo.forEach(info => {
+                 delete deletedTakesCacheRef.current[info.text];
+              });
+            },
+            onCancel: () => {
+               editorRef.current?.trigger('app', 'undo', null);
+            }
+          });
+        }
+      }
+
       setLineTakesMap(prev => {
         const newMap = { ...prev };
         const maxKeys = Object.keys(newMap)
@@ -1178,29 +1229,15 @@ function App() {
 
         if (addedCount === 0) {
           // 純粋な削除（1行以上消した）
-          const takesToDelete: TakeData[] = [];
           for (let i = 0; i < removedCount; i++) {
             const id = `${layerId}-${changeIndex + i}`;
-            if (newMap[id]) {
-              takesToDelete.push(...newMap[id].takes);
-              delete newMap[id];
-            }
-          }
-          if (takesToDelete.length > 0) {
-            deleteAudioFiles(takesToDelete);
+            delete newMap[id];
           }
         } else if (removedCount > 0) {
-          // 置換・分割（changeIndex は維持、その後ろの消された分を削除）
-          const takesToDelete: TakeData[] = [];
+          // 置換・分割
           for (let i = 1; i < removedCount; i++) {
             const id = `${layerId}-${changeIndex + i}`;
-            if (newMap[id]) {
-              takesToDelete.push(...newMap[id].takes);
-              delete newMap[id];
-            }
-          }
-          if (takesToDelete.length > 0) {
-            deleteAudioFiles(takesToDelete);
+            delete newMap[id];
           }
         }
 
@@ -1223,6 +1260,16 @@ function App() {
             if (newMap[oldId]) {
               newMap[newId] = newMap[oldId];
               delete newMap[oldId];
+            }
+          }
+        }
+
+        // 新しく追加された行に対するペースト/復元処理
+        if (addedCount > 0) {
+          for (let i = 0; i < addedCount; i++) {
+            const newText = newLines[changeIndex + i];
+            if (newText.trim() && deletedTakesCacheRef.current[newText]) {
+              newMap[`${layerId}-${changeIndex + i}`] = deletedTakesCacheRef.current[newText];
             }
           }
         }
@@ -2283,7 +2330,10 @@ function App() {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
               {dialog.type !== 'alert' && (
                 <button 
-                  onClick={() => setDialog(null)}
+                  onClick={() => {
+                    if (dialog.onCancel) dialog.onCancel();
+                    setDialog(null);
+                  }}
                   style={{ padding: '8px 16px', backgroundColor: 'transparent', color: '#cbd5e0', border: '1px solid #4a5568', borderRadius: '4px', cursor: 'pointer', fontSize: '14px', transition: 'background-color 0.2s' }}
                   onMouseEnter={e => e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'}
                   onMouseLeave={e => e.currentTarget.style.backgroundColor = 'transparent'}

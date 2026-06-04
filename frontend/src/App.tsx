@@ -499,7 +499,7 @@ function App() {
     }
   }, [monaco]);
 
-  // 再生ヘッドが動いた時、または再生状態が変わった時にオーディオを制御
+  // 再生状態が変わった時の初期化と停止
   useEffect(() => {
     if (isPlaying) {
       tick(playheadYRef.current / GRID_HEIGHT);
@@ -508,6 +508,17 @@ function App() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, tick, stopAll]);
+
+  // playheadY が更新されるたびに音声をスケジューリングする
+  useEffect(() => {
+    const handlePlayheadUpdate = (e: any) => {
+      if (isPlaying) {
+        tick(e.detail.y / GRID_HEIGHT);
+      }
+    };
+    window.addEventListener('playheadUpdate', handlePlayheadUpdate);
+    return () => window.removeEventListener('playheadUpdate', handlePlayheadUpdate);
+  }, [isPlaying, tick, GRID_HEIGHT]);
 
   // テキストが変更されるたびにローカルストレージに自動保存
   useEffect(() => {

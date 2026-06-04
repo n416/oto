@@ -10,6 +10,7 @@ export async function generateTake(
   lineIndex?: number,
   signal?: AbortSignal
 ): Promise<TakeData> {
+  console.log(`[generateTake] Start -> layer: ${layer}, text: "${text}"`);
   let audioUrl = "#";
 
   if (layer === 'dialogue') {
@@ -44,14 +45,24 @@ export async function generateTake(
       throw new Error(`キャラクター「${charId}」が見つからないか、参考音声が割り当てられていません。ボイスライブラリから割り当てを行ってください。`);
     }
 
+    console.log(`[generateTake] Character resolved: ${charId}, fetching refAudioPath: ${character.refAudioPath.substring(0, 50)}...`);
+
     // 既存のURL/Blobからファイルデータを取得
-    const response = await fetch(character.refAudioPath, { signal });
-    const blob = await response.blob();
+    let blob: Blob;
+    try {
+      const response = await fetch(character.refAudioPath, { signal });
+      blob = await response.blob();
+      console.log(`[generateTake] Fetched refAudio size: ${blob.size} bytes`);
+    } catch (e: any) {
+      console.error(`[generateTake] Failed to fetch refAudioPath. Is the Blob URL expired? Error:`, e);
+      throw e;
+    }
 
     const formData = new FormData();
     formData.append("text", speechText);
     formData.append("uploaded_audio", blob, "reference.wav");
 
+    console.log(`[generateTake] Sending request to Irodori API (http://127.0.0.1:7860/generate)`);
     const res = await fetch("http://127.0.0.1:7860/generate", {
       method: "POST",
       body: formData,
@@ -60,10 +71,11 @@ export async function generateTake(
     
     if (!res.ok) {
       const errText = await res.text();
-      console.error("Irodori API Error:", res.status, errText);
+      console.error("[generateTake] Irodori API Error:", res.status, errText);
       throw new Error(`HTTP error! status: ${res.status}. Detail: ${errText}`);
     }
     const resultData = await res.json();
+    console.log(`[generateTake] Irodori API response received:`, resultData);
     audioUrl = resultData.urls?.[0] || "#";
 
   } else if (layer === 'sfx') {
@@ -109,22 +121,36 @@ export async function generateTake(
 
   // GradioのテンポラリURLはバックエンド再起動で消えるため、生成直後に永続化(アップロード)する
   try {
+    console.log(`[generateTake] Fetching generated audio for persistence: ${audioUrl}`);
     const audioRes = await fetch(audioUrl, { signal });
     const arrayBuffer = await audioRes.arrayBuffer();
+    console.log(`[generateTake] Fetched generated audio size: ${arrayBuffer.byteLength} bytes`);
     
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const decodedData = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
       duration = decodedData.duration;
+      // AudioContextの上限（6個等）に達してクラッシュするのを防ぐため必ずcloseする
+      await audioCtx.close();
     } catch (e) {
       console.warn("Failed to decode audio duration in generateTake", e);
     }
 
-    // ArrayBuffer to Base64 (巨大ファイルには適さないが、音声なら問題ない範囲)
-    const base64 = btoa(
-      new Uint8Array(arrayBuffer)
-        .reduce((data, byte) => data + String.fromCharCode(byte), '')
-    );
+    // FileReaderを使って安全にBase64文字列を取得する
+    console.log(`[generateTake] Converting ArrayBuffer to Base64 using FileReader...`);
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        // data:audio/wav;base64,..... から base64データ部分だけを抽出
+        const base64Data = dataUrl.split(',')[1];
+        resolve(base64Data);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(new Blob([arrayBuffer]));
+    });
+    
+    console.log(`[generateTake] Base64 conversion done, length: ${base64.length}. Sending to /api/backend/upload...`);
     const uploadRes = await fetch('/api/backend/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -133,12 +159,20 @@ export async function generateTake(
     });
     if (uploadRes.ok) {
       const data = await uploadRes.json();
+      console.log(`[generateTake] Persistence successful:`, data.url);
       audioUrl = data.url; // 永続化されたURLに差し替え
+    } else {
+      console.warn(`[generateTake] Persistence API returned non-ok status: ${uploadRes.status}`);
     }
-  } catch (e) {
-    console.warn("生成された音声の永続化に失敗しました。GradioのURLをフォールバックとして使用します。", e);
+  } catch (e: any) {
+    console.warn(`[generateTake] 生成された音声の永続化ステップでエラー発生:`, e);
+    // AbortErrorの場合はそのまま上に投げる（一括生成のキャンセルを正しくハンドルするため）
+    if (e.name === 'AbortError') {
+      throw e;
+    }
   }
 
+  console.log(`[generateTake] Done. Returning audioUrl: ${audioUrl}, duration: ${duration}`);
   return {
     id: `take_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     audioUrl: audioUrl,

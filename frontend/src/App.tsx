@@ -325,7 +325,13 @@ function App() {
     return {};
   });
 
-  const [audioDurations, setAudioDurations] = useState<Record<string, number>>({});
+  const [audioDurations, setAudioDurations] = useState<Record<string, number>>(() => {
+    const saved = localStorage.getItem('oto_ide_audiodurations');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) {}
+    }
+    return {};
+  });
 
   const [cursorPos, setCursorPos] = useState<number | null>(null);
   const [sfxAutocomplete, setSfxAutocomplete] = useState<{ active: boolean, lineIndex: number, colIndex: number } | null>(null);
@@ -440,10 +446,12 @@ function App() {
   const lineTakesMapRef = useRef(lineTakesMap);
   const audioDurationsRef = useRef(audioDurations);
   const activeTabRef = useRef(activeTab);
+  const isPlayingRef = useRef(isPlaying);
   
   useEffect(() => { lineTakesMapRef.current = lineTakesMap; }, [lineTakesMap]);
   useEffect(() => { audioDurationsRef.current = audioDurations; }, [audioDurations]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   useEffect(() => {
     if (monaco && !hasRegisteredMonacoProviders) {
@@ -548,6 +556,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('oto_ide_linetakes', JSON.stringify(lineTakesMap));
   }, [lineTakesMap]);
+
+  useEffect(() => {
+    localStorage.setItem('oto_ide_audiodurations', JSON.stringify(audioDurations));
+  }, [audioDurations]);
 
   // JSONファイルへの書き出し
   const handleExport = () => {
@@ -685,7 +697,7 @@ function App() {
   // playheadY の位置に合わせてタイムラインのスクロール位置を自動追従させる
   useEffect(() => {
     const handlePlayheadUpdate = (e: any) => {
-      if (timelineRef.current && isPlaying) {
+      if (timelineRef.current) {
         const container = timelineRef.current;
         const y = e.detail.y;
         const margin = 50; // 上下のマージン
@@ -702,7 +714,7 @@ function App() {
     };
     window.addEventListener('playheadUpdate', handlePlayheadUpdate);
     return () => window.removeEventListener('playheadUpdate', handlePlayheadUpdate);
-  }, [isPlaying]);
+  }, []);
 
   const handlePlayToggle = () => {
     if (!isPlaying && playheadYRef.current >= maxLines * GRID_HEIGHT) {
@@ -1324,7 +1336,7 @@ function App() {
   }, [scripts, cursorPos]);
 
   const updatePlayheadFromCursor = (offset: number, text: string) => {
-    if (isPlaying) return; // 再生中は移動無効
+    if (isPlayingRef.current) return; // 再生中は移動無効
     
     const textBeforeCursor = text.substring(0, offset);
     const lines = textBeforeCursor.split('\n');
@@ -1338,12 +1350,12 @@ function App() {
     const ratio = currentLineText.length > 0 ? colIndex / currentLineText.length : 0;
     
     // この行の音声ブロックの長さを取得
-    const blockId = `${activeTab}-${lineIndex}`;
-    const takesData = lineTakesMap[blockId];
+    const blockId = `${activeTabRef.current}-${lineIndex}`;
+    const takesData = lineTakesMapRef.current[blockId];
     
     let blockDurationLines = 1; 
-    if (takesData && takesData.activeTakeId && audioDurations[takesData.activeTakeId]) {
-      const duration = audioDurations[takesData.activeTakeId];
+    if (takesData && takesData.activeTakeId && audioDurationsRef.current[takesData.activeTakeId]) {
+      const duration = audioDurationsRef.current[takesData.activeTakeId];
       blockDurationLines = Math.max(1, Math.ceil(duration));
     }
     
@@ -1378,7 +1390,8 @@ function App() {
 
   const visibleLayers = layers.filter(l => l.visibleInTimeline);
 
-  const askConfirm = (title: string, message: string): Promise<boolean> => {
+
+  const askConfirm = useCallback((title: string, message: string): Promise<boolean> => {
     return new Promise(resolve => {
       setDialog({
         type: 'confirm',
@@ -1388,9 +1401,9 @@ function App() {
         onCancel: () => resolve(false)
       });
     });
-  };
+  }, []);
 
-  const askPrompt = (title: string, message: string): Promise<string | null> => {
+  const askPrompt = useCallback((title: string, message: string): Promise<string | null> => {
     return new Promise(resolve => {
       setDialog({
         type: 'prompt',
@@ -1401,7 +1414,7 @@ function App() {
         onCancel: () => resolve(null)
       });
     });
-  };
+  }, []);
 
   const handleBatchGenerate = async () => {
     const blocksToGenerate = timelineBlocks.filter(block => {
@@ -1467,6 +1480,7 @@ function App() {
               let audioUrl = resultData.urls?.[0] || "#";
 
               try {
+                // ここにもキャッシュバスターを適用
                 const audioRes = await fetch(audioUrl + (audioUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
                 const arrayBuffer = await audioRes.arrayBuffer();
                 const base64 = btoa(
@@ -1532,6 +1546,16 @@ function App() {
 
       const block = blocksToGenerate[i];
       setBatchProgress({ current: i + 1, total: blocksToGenerate.length, status: batchStateRef.current as 'running' | 'paused' });
+      
+      // 生成進捗に合わせてタイムラインを自動スクロールさせる
+      if (timelineRef.current) {
+        const y = block.lineIndex * GRID_HEIGHT;
+        const container = timelineRef.current;
+        const margin = 50;
+        if (y > container.scrollTop + container.clientHeight - margin || y < container.scrollTop + margin) {
+          container.scrollTop = Math.max(0, y - container.clientHeight / 2);
+        }
+      }
       
       // 現在の実際の行インデックスを計算
       // 自分の元の行より「前」の行に挿入されたパディングの合計を足す

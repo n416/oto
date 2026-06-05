@@ -1378,6 +1378,31 @@ function App() {
 
   const visibleLayers = layers.filter(l => l.visibleInTimeline);
 
+  const askConfirm = (title: string, message: string): Promise<boolean> => {
+    return new Promise(resolve => {
+      setDialog({
+        type: 'confirm',
+        title,
+        message,
+        onConfirm: () => resolve(true),
+        onCancel: () => resolve(false)
+      });
+    });
+  };
+
+  const askPrompt = (title: string, message: string): Promise<string | null> => {
+    return new Promise(resolve => {
+      setDialog({
+        type: 'prompt',
+        title,
+        message,
+        defaultValue: '',
+        onConfirm: (val) => resolve(val || null),
+        onCancel: () => resolve(null)
+      });
+    });
+  };
+
   const handleBatchGenerate = async () => {
     const blocksToGenerate = timelineBlocks.filter(block => {
       if (block.layer !== 'dialogue' && block.layer !== 'sfx') return false;
@@ -1391,6 +1416,103 @@ function App() {
       setDialog({ type: 'alert', title: '一括生成', message: '未生成のブロックはありません。' });
       return;
     }
+
+    // ==== ここからキャラクター自動生成フロー追加 ====
+    const missingChars = new Set<string>();
+    blocksToGenerate.forEach(block => {
+      if (block.layer === 'dialogue') {
+        const match = block.text.match(/^(.+?)[：:]\s*(.+)$/);
+        let charId = "";
+        if (match) {
+          charId = match[1].trim();
+        } else {
+          const lines = (scripts['dialogue'] || '').split('\n');
+          for (let i = block.lineIndex; i >= 0; i--) {
+            const m = lines[i].match(/^(.+?)[：:]\s*(.+)$/);
+            if (m) {
+              charId = m[1].trim();
+              break;
+            }
+          }
+        }
+        if (charId) {
+          missingChars.add(charId);
+        }
+      }
+    });
+
+    let currentChars = [...characters];
+    for (const charId of missingChars) {
+      const charInfo = currentChars.find(c => c.id === charId);
+      if (!charInfo || !charInfo.refAudioPath) {
+        const shouldGenerate = await askConfirm(
+          '未登録のキャラクター',
+          `キャラクター「${charId}」が未登録、または参考音声がありません。自動生成して追加しますか？\n（キャンセルするとこのキャラクターの生成はスキップされ、エラーになります）`
+        );
+        if (shouldGenerate) {
+          const voicePrompt = await askPrompt(
+            '声の特徴を指定',
+            `「${charId}」の声の特徴（プロンプト）を入力してください。\n例：少し低めで落ち着いた、20代女性の声`
+          );
+          if (voicePrompt) {
+            try {
+              const speechText = "私は" + charId + "です。";
+              const res = await fetch("http://127.0.0.1:7861/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: speechText, caption: voicePrompt })
+              });
+              if (!res.ok) throw new Error(`HTTP status: ${res.status}`);
+              const resultData = await res.json();
+              let audioUrl = resultData.urls?.[0] || "#";
+
+              try {
+                const audioRes = await fetch(audioUrl + (audioUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
+                const arrayBuffer = await audioRes.arrayBuffer();
+                const base64 = btoa(
+                  new Uint8Array(arrayBuffer)
+                    .reduce((data, byte) => data + String.fromCharCode(byte), '')
+                );
+                const uploadRes = await fetch('/api/backend/upload', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ filename: `voice_${Date.now()}.wav`, base64 })
+                });
+                if (uploadRes.ok) {
+                  const data = await uploadRes.json();
+                  audioUrl = data.url;
+                }
+              } catch (e) {
+                console.warn("永続化に失敗:", e);
+              }
+
+              const newVoice: VoiceData = {
+                id: `voice_${Date.now()}`,
+                name: `自動生成: ${charId}`,
+                prompt: voicePrompt,
+                text: speechText,
+                audioUrl: audioUrl,
+                source: 'generated',
+                timestamp: new Date().toLocaleTimeString()
+              };
+              
+              setVoices(prev => [newVoice, ...prev]);
+              
+              const newChar = { id: charId, name: charId, refAudioPath: audioUrl, refText: speechText };
+              currentChars = currentChars.find(c => c.id === charId)
+                ? currentChars.map(c => c.id === charId ? { ...c, refAudioPath: audioUrl, refText: speechText } : c)
+                : [...currentChars, newChar];
+                
+              setCharacters(currentChars);
+            } catch (err) {
+              console.error(err);
+              await askConfirm('生成エラー', `音声の自動生成に失敗しました。このまま進めますか？`);
+            }
+          }
+        }
+      }
+    }
+    // ==== キャラクター自動生成フロー終了 ====
 
     batchStateRef.current = 'running';
     setBatchProgress({ current: 0, total: blocksToGenerate.length, status: 'running' });
@@ -1431,7 +1553,7 @@ function App() {
         const fullScript = scripts[block.layer] || '';
         const controller = new AbortController();
         batchAbortControllerRef.current = controller;
-        const newTake = await generateTake(block.layer, block.text, characters, fullScript, block.lineIndex, controller.signal);
+        const newTake = await generateTake(block.layer, block.text, currentChars, fullScript, block.lineIndex, controller.signal);
         
         console.log(`[Batch] 音声生成完了: ${newTake.audioUrl}`);
 

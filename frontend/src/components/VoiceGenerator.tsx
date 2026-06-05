@@ -81,7 +81,7 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
       let audioUrl = resultData.urls?.[0] || "#";
 
       try {
-        const audioRes = await fetch(audioUrl);
+        const audioRes = await fetch(audioUrl + (audioUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
         const arrayBuffer = await audioRes.arrayBuffer();
         const base64 = btoa(
           new Uint8Array(arrayBuffer)
@@ -220,7 +220,7 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
       let audioUrl = resultData.urls?.[0] || "#";
 
       try {
-        const audioRes = await fetch(audioUrl);
+        const audioRes = await fetch(audioUrl + (audioUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
         const arrayBuffer = await audioRes.arrayBuffer();
         const base64 = btoa(
           new Uint8Array(arrayBuffer)

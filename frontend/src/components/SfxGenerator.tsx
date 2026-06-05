@@ -87,7 +87,7 @@ export const SfxGenerator: React.FC<SfxGeneratorProps> = ({ sfxs, setSfxs, setDi
       let audioUrl = resultData.url || "#";
 
       try {
-        const audioRes = await fetch(audioUrl);
+        const audioRes = await fetch(audioUrl + (audioUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
         const arrayBuffer = await audioRes.arrayBuffer();
         const base64 = btoa(
           new Uint8Array(arrayBuffer)

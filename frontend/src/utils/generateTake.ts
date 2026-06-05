@@ -122,7 +122,7 @@ export async function generateTake(
   // GradioのテンポラリURLはバックエンド再起動で消えるため、生成直後に永続化(アップロード)する
   try {
     console.log(`[generateTake] Fetching generated audio for persistence: ${audioUrl}`);
-    const audioRes = await fetch(audioUrl, { signal });
+    const audioRes = await fetch(audioUrl + (audioUrl.includes('?') ? '&' : '?') + 't=' + Date.now(), { signal });
     const arrayBuffer = await audioRes.arrayBuffer();
     console.log(`[generateTake] Fetched generated audio size: ${arrayBuffer.byteLength} bytes`);
     

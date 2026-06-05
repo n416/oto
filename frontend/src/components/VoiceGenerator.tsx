@@ -203,8 +203,8 @@ export const VoiceGenerator: React.FC<VoiceGeneratorProps> = ({ characters, setC
     if (isGenerating) return;
     setIsGenerating(true);
     
-    // プロンプトに絵文字を追加
-    const newPrompt = `${voice.prompt} ${emoji}`.trim();
+    // プロンプトの先頭に絵文字を追加（Irodori-TTSの仕様上、先頭の方が効果が安定するため）
+    const newPrompt = `${emoji} ${voice.prompt}`.trim();
     
     try {
       const res = await fetch("http://127.0.0.1:7861/generate", {

@@ -3,9 +3,9 @@
 台本から音声ドラマをつくる、**縦型タイムラインのオーディオエディタ**です。
 台本を書くと、セリフ（[Irodori-TTS](https://github.com/Aratako/Irodori-TTS)）と効果音（[AudioGen](https://github.com/facebookresearch/audiocraft)）をローカルで生成し、上から下へ流れるタイムラインに並べます。
 
-[![操作の流れ（2倍速・音声なし）](docs/images/preview.gif)](docs/oto_intro.mp4)
+[![操作の流れ（2倍速・音声なし）](docs/images/preview.gif)](https://youtu.be/34QK5mnsud0)
 
-▶ [ナレーション付きの紹介動画を見る（mp4・音声あり・約1分40秒）](docs/oto_intro.mp4)
+▶ [YouTube で紹介動画を見る（ナレーション付き・約1分40秒）](https://youtu.be/34QK5mnsud0)（[mp4 ファイル](docs/oto_intro.mp4)）
 
 ![oto のスクリーンショット](docs/images/screenshot.png)
 
